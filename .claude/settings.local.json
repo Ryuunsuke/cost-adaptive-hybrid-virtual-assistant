@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"d:\\\\Projects\\\\CAHVA\\\\backend\" -Recurse)",
+      "Bash(Select-Object FullName, PSIsContainer)",
+      "Bash(Sort-Object FullName)",
+      "Bash(Format-List)",
+      "PowerShell(cd d:\\\\Projects\\\\CAHVA\\\\frontend; tree /F /A 2>$null | Where-Object {$_ -notmatch 'node_modules'})"
+    ]
+  }
+}

@@ -1,0 +1,73 @@
+.username-prompt {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #f0f0f0;
+}
+
+.username-card {
+  background: white;
+  border-radius: 12px;
+  padding: 48px 40px;
+  width: 360px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.1);
+  text-align: center;
+}
+
+.username-card h1 {
+  margin: 0 0 8px;
+  font-size: 2rem;
+  color: #007bff;
+}
+
+.username-card p {
+  margin: 0 0 24px;
+  color: #666;
+  font-size: 0.95rem;
+}
+
+.username-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.username-card input {
+  padding: 12px 16px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.username-card input:focus {
+  border-color: #007bff;
+}
+
+.username-card button {
+  padding: 12px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.username-card button:hover:not(:disabled) {
+  background-color: #0056b3;
+}
+
+.username-card button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+.prompt-error {
+  margin: 8px 0 0;
+  color: #dc3545;
+  font-size: 0.9rem;
+}
