@@ -849,7 +849,7 @@ async def get_session_cost_summary(session_id: int) -> dict:
             """
             SELECT
                 COALESCE(SUM(cost) FILTER (WHERE cost > 0), 0)   AS total_spend,
-                COALESCE(ABS(SUM(cost)) FILTER (WHERE cost < 0), 0) AS total_reward,
+                COALESCE(ABS(SUM(cost) FILTER (WHERE cost < 0)), 0) AS total_reward,
                 COALESCE(SUM(cost), 0)                            AS net_cost,
                 COUNT(*) FILTER (WHERE model_name = 'llama3.2:3b') AS local_requests,
                 COUNT(*) FILTER (WHERE model_name <> 'llama3.2:3b'

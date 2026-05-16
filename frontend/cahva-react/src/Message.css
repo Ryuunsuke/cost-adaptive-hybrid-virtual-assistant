@@ -11,8 +11,36 @@
   justify-content: flex-start;
 }
 
-.message-content {
+.message-wrapper {
+  display: flex;
+  flex-direction: column;
   max-width: 70%;
+}
+
+.message.user .message-wrapper {
+  align-items: flex-end;
+}
+
+.message.assistant .message-wrapper {
+  align-items: flex-start;
+}
+
+.model-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.badge-local   { background: #d1f2eb; color: #0e6655; }
+.badge-mini    { background: #cce5ff; color: #004085; }
+.badge-complex { background: #e8daef; color: #5b2c6f; }
+.badge-tool    { background: #fef9e7; color: #7d6608; border: 1px solid #f9e79f; }
+
+.message-content {
   padding: 14px 18px;
   border-radius: 18px;
   word-wrap: break-word;

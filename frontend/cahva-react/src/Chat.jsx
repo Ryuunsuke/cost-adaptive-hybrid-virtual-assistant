@@ -1,11 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
 import Message from './Message';
 import ChatInput from './ChatInput';
+import Stats from './Stats';
 import './Chat.css';
 
 function Chat({ sessionId, username, onBack }) {
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('chat');
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -44,15 +46,19 @@ function Chat({ sessionId, username, onBack }) {
       if (!response.ok) throw new Error("Network response was not ok");
 
       const data = await response.json();
-      const assistantMessage = { id: Date.now() + 1, text: data.reply, sender: 'assistant' };
+      const assistantMessage = {
+        id: Date.now() + 1,
+        text: data.reply,
+        sender: 'assistant',
+        model: data.routing_decision,
+      };
       setMessages(prev => [...prev, assistantMessage]);
     } catch (error) {
-      const errorMessage = {
+      setMessages(prev => [...prev, {
         id: Date.now() + 1,
         text: "Sorry, I'm having trouble connecting to the server.",
         sender: 'assistant',
-      };
-      setMessages(prev => [...prev, errorMessage]);
+      }]);
       console.error("Error:", error);
     } finally {
       setIsLoading(false);
@@ -66,14 +72,32 @@ function Chat({ sessionId, username, onBack }) {
         <h1>Chat Assistant</h1>
         <span className="chat-username">{username}</span>
       </div>
-      <div className="messages-container">
-        {messages.map(message => (
-          <Message key={message.id} message={message} />
-        ))}
-        {isLoading && <div className="message assistant">Thinking...</div>}
-        <div ref={messagesEndRef} />
+
+      <div className="chat-tabs">
+        <button
+          className={`chat-tab ${activeTab === 'chat' ? 'active' : ''}`}
+          onClick={() => setActiveTab('chat')}
+        >Chat</button>
+        <button
+          className={`chat-tab ${activeTab === 'stats' ? 'active' : ''}`}
+          onClick={() => setActiveTab('stats')}
+        >Stats</button>
       </div>
-      <ChatInput onSendMessage={handleSendMessage} />
+
+      {activeTab === 'chat' ? (
+        <>
+          <div className="messages-container">
+            {messages.map(message => (
+              <Message key={message.id} message={message} />
+            ))}
+            {isLoading && <div className="message assistant">Thinking...</div>}
+            <div ref={messagesEndRef} />
+          </div>
+          <ChatInput onSendMessage={handleSendMessage} />
+        </>
+      ) : (
+        <Stats sessionId={sessionId} />
+      )}
     </div>
   );
 }

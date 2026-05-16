@@ -49,6 +49,35 @@
   white-space: nowrap;
 }
 
+.chat-tabs {
+  display: flex;
+  background: white;
+  border-bottom: 2px solid #e9ecef;
+  flex-shrink: 0;
+}
+
+.chat-tab {
+  padding: 10px 24px;
+  background: none;
+  border: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #888;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.chat-tab:hover {
+  color: #007bff;
+}
+
+.chat-tab.active {
+  color: #007bff;
+  border-bottom-color: #007bff;
+}
+
 .messages-container {
   flex: 1;
   overflow-y: auto;

@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from services.db_con import (
     init_db_pool, close_db_pool, bootstrap_schema,
     upsert_user, get_user_sessions, create_session, delete_session,
     create_message, get_session_history,
+    get_session, get_session_cost_summary,
 )
 
 
@@ -72,6 +74,29 @@ async def new_session_endpoint(request: NewSessionRequest):
     return {
         "session_id": session["id_session"],
         "started_at": session["started_at"].isoformat(),
+    }
+
+
+@app.get("/api/stats")
+async def stats_endpoint(session_id: int):
+    session, summary = await asyncio.gather(
+        get_session(session_id),
+        get_session_cost_summary(session_id),
+    )
+    return {
+        "budget": {
+            "visible_limit":  float(session["daily_visible_limit"]),
+            "visible_used":   float(session["visible_used"]),
+            "shadow_reserve": float(session["shadow_reserve"]),
+            "shadow_used":    float(session["shadow_used"]),
+            "quiz_bonus":     float(session["quiz_bonus"]),
+        },
+        "activity": {
+            "local_requests": int(summary["local_requests"]),
+            "cloud_requests": int(summary["cloud_requests"]),
+            "total_spend":    float(summary["total_spend"]),
+            "total_reward":   float(summary["total_reward"]),
+        },
     }
 
 
