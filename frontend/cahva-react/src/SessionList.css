@@ -15,10 +15,80 @@
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.1);
 }
 
+.session-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
 .session-list-container h1 {
-  margin: 0 0 24px;
+  margin: 0;
   font-size: 1.5rem;
   color: #333;
+}
+
+.cal-open-btn {
+  padding: 8px 14px;
+  background: #f0f4ff;
+  color: #3d5afe;
+  border: 1px solid #c5cae9;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.cal-open-btn:hover {
+  background: #e3eaff;
+}
+
+/* ── Global budget card ── */
+.global-budget-card {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.global-budget-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.global-budget-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #999;
+}
+
+.global-budget-numbers {
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.global-budget-unit {
+  color: #aaa;
+  font-size: 0.75rem;
+}
+
+.global-budget-meta {
+  font-size: 0.75rem;
+  color: #aaa;
+}
+
+.global-bonus-note {
+  color: #2e7d32;
+  font-weight: 600;
 }
 
 .new-session-btn {
@@ -58,7 +128,7 @@
 
 .session-select {
   flex: 1;
-  padding: 14px 16px;
+  padding: 10px 14px;
   background: #f8f9fa;
   border: 1px solid #e9ecef;
   border-radius: 8px;
@@ -67,11 +137,59 @@
   font-size: 0.95rem;
   color: #555;
   transition: background-color 0.15s, border-color 0.15s;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .session-select:hover {
   background-color: #e8f0fe;
   border-color: #007bff;
+}
+
+.session-date {
+  font-size: 0.9rem;
+  color: #555;
+}
+
+/* ── Per-session token display ── */
+
+.session-tokens-used {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.budget-used  { color: #333; font-weight: 600; }
+.budget-sep   { color: #aaa; }
+.budget-total { color: #888; }
+.session-tokens-label { color: #aaa; }
+
+.budget-bonus {
+  font-size: 0.7rem;
+  color: #2e7d32;
+  font-weight: 700;
+}
+
+/* ── Global budget bar (used in GlobalBudgetCard) ── */
+
+.budget-track {
+  height: 4px;
+  background: #e9ecef;
+  border-radius: 2px;
+  overflow: hidden;
+  display: flex;
+}
+
+.budget-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+
+.budget-bonus-fill {
+  height: 100%;
+  background: #a5d6a7;
+  border-radius: 2px;
 }
 
 .session-delete {

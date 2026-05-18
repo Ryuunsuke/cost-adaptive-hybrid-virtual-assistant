@@ -209,6 +209,17 @@ CREATE TABLE IF NOT EXISTS file (
     uploaded_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
+-- Calendar events for the scheduling screen
+CREATE TABLE IF NOT EXISTS calendar_event (
+    id_event    SERIAL       PRIMARY KEY,
+    user_id     INT          NOT NULL REFERENCES "user"(id_user) ON DELETE CASCADE,
+    title       VARCHAR(255) NOT NULL,
+    description TEXT,
+    start_date  TIMESTAMPTZ  NOT NULL,
+    end_date    TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
 -- MCP tool result cache (quiz, summary, schedule) – thesis §3.5
 CREATE TABLE IF NOT EXISTS tool_output (
     id_tool         SERIAL       PRIMARY KEY,
@@ -245,6 +256,17 @@ CREATE TABLE IF NOT EXISTS quiz_attempt (
     total_questions INT           NOT NULL,
     budget_reward   NUMERIC(10,4) NOT NULL DEFAULT 0,  -- tokens credited (50 × score)
     submitted_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- Session-scoped study schedule entries (tool-generated or manually created)
+CREATE TABLE IF NOT EXISTS schedule_entry (
+    id_entry        SERIAL        PRIMARY KEY,
+    session_id      INT           NOT NULL REFERENCES session(id_session) ON DELETE CASCADE,
+    date            DATE          NOT NULL,
+    topics          JSONB         NOT NULL,
+    duration_hours  NUMERIC(4,2)  NOT NULL DEFAULT 2.0,
+    note            TEXT,
+    created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 """
 
@@ -632,6 +654,22 @@ async def get_session_file(session_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def get_session_files(session_id: int) -> list[dict]:
+    """Return all files uploaded for *session_id*, newest first."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id_file, session_id, filename, extracted_text, uploaded_at
+            FROM   file
+            WHERE  session_id = $1
+            ORDER  BY uploaded_at DESC
+            """,
+            session_id,
+        )
+    return [dict(r) for r in rows]
+
+
 async def update_file_text(file_id: int, extracted_text: str) -> None:
     """
     Backfill extracted_text on an existing file row.
@@ -904,3 +942,181 @@ async def list_models() -> list[dict]:
             "SELECT id_model, model_name, input_cost_per_token, output_cost_per_token FROM model ORDER BY id_model"
         )
     return [dict(r) for r in rows]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# calendar_event table
+# ════════════════════════════════════════════════════════════════════════════
+
+async def create_calendar_event(
+    user_id: int,
+    title: str,
+    description: Optional[str],
+    start_date: str,
+    end_date: Optional[str] = None,
+) -> dict:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO calendar_event (user_id, title, description, start_date, end_date)
+            VALUES ($1, $2, $3, $4::TIMESTAMPTZ, $5::TIMESTAMPTZ)
+            RETURNING id_event, user_id, title, description, start_date, end_date, created_at
+            """,
+            user_id, title, description, start_date, end_date,
+        )
+    return dict(row)
+
+
+async def get_calendar_events(user_id: int) -> list[dict]:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id_event, user_id, title, description, start_date, end_date, created_at
+            FROM   calendar_event
+            WHERE  user_id = $1
+            ORDER  BY start_date ASC
+            """,
+            user_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def update_calendar_event(
+    event_id: int,
+    user_id: int,
+    title: str,
+    description: Optional[str],
+    start_date: str,
+    end_date: Optional[str],
+) -> Optional[dict]:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE calendar_event
+            SET    title = $3, description = $4,
+                   start_date = $5::TIMESTAMPTZ, end_date = $6::TIMESTAMPTZ
+            WHERE  id_event = $1 AND user_id = $2
+            RETURNING id_event, user_id, title, description, start_date, end_date, created_at
+            """,
+            event_id, user_id, title, description, start_date, end_date,
+        )
+    return dict(row) if row else None
+
+
+async def delete_calendar_event(event_id: int, user_id: int) -> bool:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM calendar_event WHERE id_event = $1 AND user_id = $2",
+            event_id, user_id,
+        )
+    return result == "DELETE 1"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# schedule_entry table  (session-scoped study schedule)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _parse_schedule_row(row) -> dict:
+    d = dict(row)
+    topics_val = d.get("topics")
+    if isinstance(topics_val, str):
+        d["topics"] = json.loads(topics_val)
+    elif topics_val is None:
+        d["topics"] = []
+    date_val = d.get("date")
+    if hasattr(date_val, "isoformat"):
+        d["date"] = date_val.isoformat()
+    created_val = d.get("created_at")
+    if hasattr(created_val, "isoformat"):
+        d["created_at"] = created_val.isoformat()
+    return d
+
+
+async def save_schedule_entries(session_id: int, entries: list[dict]) -> None:
+    """Bulk-insert schedule day entries produced by the create_schedule tool."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        for e in entries:
+            await conn.execute(
+                """
+                INSERT INTO schedule_entry (session_id, date, topics, duration_hours, note)
+                VALUES ($1, $2::DATE, $3, $4, $5)
+                """,
+                session_id,
+                e.get("day"),
+                json.dumps(e.get("topics", [])),
+                float(e.get("hours", 2.0)),
+                e.get("notes") or None,
+            )
+
+
+async def get_schedule_entries(session_id: int) -> list[dict]:
+    """Return all schedule entries for *session_id*, sorted by date."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id_entry, session_id, date, topics, duration_hours, note, created_at
+            FROM   schedule_entry
+            WHERE  session_id = $1
+            ORDER  BY date ASC, created_at ASC
+            """,
+            session_id,
+        )
+    return [_parse_schedule_row(r) for r in rows]
+
+
+async def create_schedule_entry(
+    session_id: int,
+    date: str,
+    topics: list,
+    duration_hours: float,
+    note: Optional[str],
+) -> dict:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO schedule_entry (session_id, date, topics, duration_hours, note)
+            VALUES ($1, $2::DATE, $3, $4, $5)
+            RETURNING id_entry, session_id, date, topics, duration_hours, note, created_at
+            """,
+            session_id, date, json.dumps(topics), float(duration_hours), note,
+        )
+    return _parse_schedule_row(row)
+
+
+async def update_schedule_entry(
+    entry_id: int,
+    session_id: int,
+    date: str,
+    topics: list,
+    duration_hours: float,
+    note: Optional[str],
+) -> Optional[dict]:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE schedule_entry
+            SET    date = $3::DATE, topics = $4, duration_hours = $5, note = $6
+            WHERE  id_entry = $1 AND session_id = $2
+            RETURNING id_entry, session_id, date, topics, duration_hours, note, created_at
+            """,
+            entry_id, session_id, date, json.dumps(topics), float(duration_hours), note,
+        )
+    return _parse_schedule_row(row) if row else None
+
+
+async def delete_schedule_entry(entry_id: int, session_id: int) -> bool:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM schedule_entry WHERE id_entry = $1 AND session_id = $2",
+            entry_id, session_id,
+        )
+    return result == "DELETE 1"

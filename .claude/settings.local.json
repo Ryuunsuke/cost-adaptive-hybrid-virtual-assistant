@@ -5,7 +5,11 @@
       "Bash(Select-Object FullName, PSIsContainer)",
       "Bash(Sort-Object FullName)",
       "Bash(Format-List)",
-      "PowerShell(cd d:\\\\Projects\\\\CAHVA\\\\frontend; tree /F /A 2>$null | Where-Object {$_ -notmatch 'node_modules'})"
+      "PowerShell(cd d:\\\\Projects\\\\CAHVA\\\\frontend; tree /F /A 2>$null | Where-Object {$_ -notmatch 'node_modules'})",
+      "Bash(pip install *)",
+      "PowerShell(& \"d:\\\\Projects\\\\CAHVA\\\\backend\\\\bevenv\\\\Scripts\\\\python.exe\" -m pip install pypdf 2>&1)",
+      "Bash(Get-ChildItem \"d:\\\\Projects\\\\CAHVA\\\\backend\\\\app\\\\mcp\" -Recurse -Name)",
+      "PowerShell(Stop-Process -Name \"python\" -Force -ErrorAction SilentlyContinue)"
     ]
   }
 }

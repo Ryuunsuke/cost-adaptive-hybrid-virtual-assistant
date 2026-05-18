@@ -22,6 +22,7 @@ Design rules
 
 from __future__ import annotations
 
+import json
 import time
 from enum import Enum
 from typing import Optional
@@ -201,6 +202,85 @@ async def check_and_deduct_cloud(
 
 
 # ---------------------------------------------------------------------------
+# Two-step cloud budget helpers (use these in task_router.py)
+# ---------------------------------------------------------------------------
+async def check_pool_available(session_id: int) -> Pool:
+    """
+    Read-only check: determine which pool would cover the next cloud call.
+    Does NOT deduct anything — call deduct_cloud_actual() after the LLM returns.
+
+    Raises BudgetExhaustedError(Pool.BONUS) when both pools are at zero.
+    """
+    db_pool = await get_db_pool()
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT daily_visible_limit, visible_used, quiz_bonus, depleted_at
+            FROM   session
+            WHERE  id_session = $1
+            """,
+            session_id,
+        )
+        if row is None:
+            raise ValueError(f"Session {session_id} not found")
+
+        visible_remaining = float(row["daily_visible_limit"]) - float(row["visible_used"])
+
+        if visible_remaining > 0:
+            return Pool.VISIBLE
+
+        if float(row["quiz_bonus"]) > 0:
+            return Pool.BONUS
+
+        # Both exhausted — stamp depletion timestamp on first occurrence
+        if row["depleted_at"] is None:
+            await conn.execute(
+                """
+                UPDATE session
+                SET    depleted_at   = NOW(),
+                       next_reset_at = NOW() + INTERVAL '24 hours'
+                WHERE  id_session = $1
+                  AND  depleted_at IS NULL
+                """,
+                session_id,
+            )
+
+    raise BudgetExhaustedError(Pool.BONUS)
+
+
+async def deduct_cloud_actual(
+    session_id: int,
+    input_tokens: int,
+    output_tokens: int,
+    pool: Pool,
+) -> None:
+    """
+    Deduct actual token usage (input + output token count) from *pool*.
+    The budget is denominated in tokens, not USD — visible_limit = 5000 tokens.
+    Call this AFTER cloud_response() returns real token counts.
+    """
+    tokens = input_tokens + output_tokens
+    if tokens <= 0:
+        return
+
+    db_pool = await get_db_pool()
+    async with db_pool.acquire() as conn:
+        if pool == Pool.VISIBLE:
+            await conn.execute(
+                "UPDATE session SET visible_used = visible_used + $1 WHERE id_session = $2",
+                float(tokens),
+                session_id,
+            )
+        elif pool == Pool.BONUS:
+            # Cap at 0 to prevent negative bonus balance
+            await conn.execute(
+                "UPDATE session SET quiz_bonus = GREATEST(0, quiz_bonus - $1) WHERE id_session = $2",
+                float(tokens),
+                session_id,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Pool check + deduct – quiz generation (shadow reserve only)
 # ---------------------------------------------------------------------------
 async def check_and_deduct_shadow(
@@ -353,7 +433,7 @@ async def credit_quiz_bonus(
                 """,
                 session_id,
                 tool_output_id,
-                submitted_answers,   # stored as JSONB
+                json.dumps(submitted_answers),   # asyncpg expects str for JSONB
                 correct_count,
                 total_questions,
                 bonus_tokens,
@@ -373,6 +453,36 @@ async def credit_quiz_bonus(
             )
 
     return bonus_tokens
+
+
+async def save_quiz_attempt(
+    session_id: int,
+    correct_count: int,
+    total_questions: int,
+    tool_output_id: int,
+    submitted_answers: dict,
+) -> None:
+    """
+    Persist a quiz attempt with zero budget reward.
+
+    Called for retries after the first perfect completion, or for partial-score
+    submissions that do not earn a reward.
+    """
+    db_pool = await get_db_pool()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO quiz_attempt
+                (session_id, tool_output_id, submitted_answers,
+                 score, total_questions, budget_reward, submitted_at)
+            VALUES ($1, $2, $3, $4, $5, 0, NOW())
+            """,
+            session_id,
+            tool_output_id,
+            json.dumps(submitted_answers),
+            correct_count,
+            total_questions,
+        )
 
 
 # ---------------------------------------------------------------------------

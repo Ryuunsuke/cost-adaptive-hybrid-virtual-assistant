@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import UsernamePrompt from './UsernamePrompt';
 import SessionList from './SessionList';
+import Calendar from './Calendar';
 import Chat from './Chat';
 import './App.css';
 
@@ -16,7 +17,13 @@ function App() {
       body: JSON.stringify({ user_id: userId }),
     });
     const data = await res.json();
-    const newSession = { session_id: data.session_id, started_at: data.started_at };
+    const newSession = {
+      session_id:          data.session_id,
+      started_at:          data.started_at,
+      daily_visible_limit: data.daily_visible_limit,
+      visible_used:        data.visible_used,
+      quiz_bonus:          data.quiz_bonus,
+    };
     setUser(prev => ({ ...prev, sessions: [newSession, ...prev.sessions] }));
     setSessionId(data.session_id);
     setScreen('chat');
@@ -41,12 +48,26 @@ function App() {
     setUser(prev => ({ ...prev, sessions: prev.sessions.filter(s => s.session_id !== id) }));
   };
 
-  const handleBackToSessions = () => {
+  const handleBackToSessions = async () => {
+    try {
+      const res = await fetch(`http://localhost:8000/api/sessions?user_id=${user.userId}`);
+      const data = await res.json();
+      setUser(prev => ({ ...prev, sessions: data.sessions }));
+    } catch {}
     setScreen('sessions');
   };
 
   if (screen === 'login') {
     return <UsernamePrompt onLogin={handleLogin} />;
+  }
+
+  if (screen === 'calendar') {
+    return (
+      <Calendar
+        userId={user.userId}
+        onBack={() => setScreen('sessions')}
+      />
+    );
   }
 
   if (screen === 'sessions') {
@@ -57,6 +78,7 @@ function App() {
         onSelectSession={handleSelectSession}
         onNewSession={() => startNewSession(user.userId)}
         onDeleteSession={handleDeleteSession}
+        onOpenCalendar={() => setScreen('calendar')}
       />
     );
   }

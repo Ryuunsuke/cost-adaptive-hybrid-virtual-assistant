@@ -27,7 +27,8 @@ from services.tools import get_tool, list_tools
 from services.cost_tracker import (
     Pool,
     BudgetExhaustedError,
-    check_and_deduct_cloud,
+    check_pool_available,
+    deduct_cloud_actual,
     check_and_deduct_shadow,
     log_route_event,
 )
@@ -111,7 +112,8 @@ class AgentState(TypedDict):
     response:         str    # final answer returned to the student
 
     # ── budget transparency fields (thesis §3.4.3) ───────────────────────
-    budget_pool_used: Optional[str]   # "visible" | "bonus" | "shadow" | None
+    budget_pool_used:  Optional[str]   # "visible" | "bonus" | "shadow" | None
+    forced_tool_name:  Optional[str]   # set by the frontend to bypass llama tool selection
 
     # ── evaluation / transparency fields ────────────────────────────────
     tool_calls:       list   # tool names invoked during this turn
@@ -143,6 +145,16 @@ async def triage_node(state: AgentState) -> dict:
     Classification is local-only (llama3.2:3b via Ollama) and carries no
     monetary cost; the budget check only applies from Node 2 onwards.
     """
+    # Frontend explicitly flagged this as a tool call — skip LLM triage.
+    if state.get("requires_tool"):
+        print("[LANGGRAPH]: Triage skipped — force_tool pre-classified.")
+        return {
+            "category":        "informational",
+            "confidence":      1.0,
+            "requires_tool":   True,
+            "reasoning_steps": ["triaged:pre_classified"],
+        }
+
     print("[LANGGRAPH]: Triaging (llama3.2:3b classification)...")
 
     msg = _get_message(state)
@@ -290,18 +302,9 @@ async def cloud_standard_node(state: AgentState) -> dict:
         "Provide a clear, accurate, and well-reasoned response."
     )
 
-    # ── Pre-call budget check (visible → bonus) ───────────────────────────
-    # Estimate tokens as 0 for the pre-check; actual deduction happens after
-    # the call using real token counts returned by the API.
-    # The check here acts as a balance-positive gate: if both pools are zero
-    # we block before spending anything.
+    # ── Pre-call: check which pool is available (no deduction yet) ────────
     try:
-        pool_used = await check_and_deduct_cloud(
-            session_id=state["session_id"],
-            input_tokens=0,      # pre-check: verify pool is non-zero
-            output_tokens=0,
-            model="gpt-4o-mini",
-        )
+        pool_used = await check_pool_available(session_id=state["session_id"])
     except BudgetExhaustedError:
         reasoning_steps = list(state.get("reasoning_steps") or [])
         return {
@@ -311,23 +314,24 @@ async def cloud_standard_node(state: AgentState) -> dict:
             "reasoning_steps":  reasoning_steps + ["cloud_standard_blocked:no_budget"],
         }
 
-    res = (
-        await cloud_response(
-            synthesis_prompt,
-            model="gpt-4o-mini",
-            system_prompt=system_prompt,
-        )
-        or "I've processed your request. How can I help further?"
+    res = await cloud_response(
+        synthesis_prompt,
+        model="gpt-4o-mini",
+        system_prompt=system_prompt,
     )
 
-    # ── Post-call: record actual token cost ───────────────────────────────
-    # cloud_response should return (text, input_tokens, output_tokens);
-    # if it returns a plain str, fall back to zero token counts.
+    # ── Post-call: deduct actual cost then log ────────────────────────────
     if isinstance(res, tuple):
         response_text, input_tokens, output_tokens = res
     else:
-        response_text, input_tokens, output_tokens = res, 0, 0
+        response_text, input_tokens, output_tokens = res or "", 0, 0
 
+    await deduct_cloud_actual(
+        session_id=state["session_id"],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        pool=pool_used,
+    )
     await log_route_event(
         session_id=state["session_id"],
         message_id=None,
@@ -379,14 +383,9 @@ async def cloud_complex_node(state: AgentState) -> dict:
         "Provide thorough, well-structured, and accurate responses."
     )
 
-    # ── Pre-call budget check ─────────────────────────────────────────────
+    # ── Pre-call: check which pool is available (no deduction yet) ────────
     try:
-        pool_used = await check_and_deduct_cloud(
-            session_id=state["session_id"],
-            input_tokens=0,
-            output_tokens=0,
-            model="gpt-4o",
-        )
+        pool_used = await check_pool_available(session_id=state["session_id"])
     except BudgetExhaustedError:
         reasoning_steps = list(state.get("reasoning_steps") or [])
         return {
@@ -396,20 +395,23 @@ async def cloud_complex_node(state: AgentState) -> dict:
             "reasoning_steps":  reasoning_steps + ["cloud_complex_blocked:no_budget"],
         }
 
-    res = (
-        await cloud_response(
-            synthesis_prompt,
-            model="gpt-4o",
-            system_prompt=system_prompt,
-        )
-        or "I've processed your request. How can I help further?"
+    res = await cloud_response(
+        synthesis_prompt,
+        model="gpt-4o",
+        system_prompt=system_prompt,
     )
 
     if isinstance(res, tuple):
         response_text, input_tokens, output_tokens = res
     else:
-        response_text, input_tokens, output_tokens = res, 0, 0
+        response_text, input_tokens, output_tokens = res or "", 0, 0
 
+    await deduct_cloud_actual(
+        session_id=state["session_id"],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        pool=pool_used,
+    )
     await log_route_event(
         session_id=state["session_id"],
         message_id=None,
@@ -465,23 +467,28 @@ async def tool_executor_node(state: AgentState) -> dict:
     tool_calls: list = []
     tool_results: dict = {}
 
-    # ── Tool selection (llama3.2:3b – free, local) ────────────────────────
-    tool_select_prompt = f"""Available academic tools:
-        {tools_description}
+    # ── Tool selection ────────────────────────────────────────────────────
+    # If the frontend specified a tool directly, skip the LLM selection step.
+    forced = state.get("forced_tool_name")
+    if forced:
+        tool_calls = [forced]
+        print(f"[LANGGRAPH]: Tool pre-selected by frontend: {forced}")
+    else:
+        tool_select_prompt = f"""Available academic tools:
+            {tools_description}
 
-        Which of the tools above should be called to answer this request?
-        Respond with a JSON array of tool names, e.g. ["summarize_document"] or [].
-        Do NOT include tools that are not listed above.
+            Which of the tools above should be called to answer this request?
+            Respond with a JSON array of tool names, e.g. ["summarize_document"] or [].
+            Do NOT include tools that are not listed above.
 
-        Student request: "{msg}"
-    """
-    raw = await local_response(tool_select_prompt)
-
-    try:
-        match = re.search(r"\[.*?\]", raw, re.DOTALL)
-        tool_calls = json.loads(match.group(0)) if match else []
-    except (json.JSONDecodeError, AttributeError):
-        tool_calls = []
+            Student request: "{msg}"
+        """
+        raw = await local_response(tool_select_prompt)
+        try:
+            match = re.search(r"\[.*?\]", raw, re.DOTALL)
+            tool_calls = json.loads(match.group(0)) if match else []
+        except (json.JSONDecodeError, AttributeError):
+            tool_calls = []
 
     print(f"[LANGGRAPH]: Tools selected: {tool_calls}")
 
@@ -513,11 +520,8 @@ async def tool_executor_node(state: AgentState) -> dict:
                 continue
         else:
             try:
-                pool_used_for_synthesis = await check_and_deduct_cloud(
+                pool_used_for_synthesis = await check_pool_available(
                     session_id=state["session_id"],
-                    input_tokens=0,
-                    output_tokens=0,
-                    model="gpt-4o-mini",
                 )
             except BudgetExhaustedError:
                 tool_results[tool_name] = (
@@ -527,12 +531,32 @@ async def tool_executor_node(state: AgentState) -> dict:
                 continue
 
         try:
-            result = await tool.execute(user_input=msg)
+            result = await tool.execute(session_id=state["session_id"], user_input=msg)
             tool_results[tool_name] = result
             print(f"[LANGGRAPH]: Tool '{tool_name}' executed successfully")
         except Exception as exc:
             tool_results[tool_name] = f"Error: {exc}"
             print(f"[LANGGRAPH]: Tool '{tool_name}' failed: {exc}")
+
+    # ── Quiz early-return: skip synthesis, send raw JSON to the frontend ────
+    # The React QuizDisplay component renders interactive multiple-choice UI
+    # directly from the structured data. Synthesis would only mangle the JSON.
+    if tool_calls == ["generate_quiz"]:
+        quiz_str = tool_results.get("generate_quiz", "")
+        try:
+            quiz_json = json.loads(quiz_str)
+            if "questions" in quiz_json:
+                reasoning_steps = list(state.get("reasoning_steps") or [])
+                return {
+                    "tool_calls":       tool_calls,
+                    "tool_results":     tool_results,
+                    "response":         quiz_str,
+                    "routing_decision": "GPT-4o mini (tool path)",
+                    "budget_pool_used": "shadow",
+                    "reasoning_steps":  reasoning_steps + ["quiz_generated:direct_return"],
+                }
+        except (json.JSONDecodeError, TypeError):
+            pass  # fall through to synthesis so the error text gets a reply
 
     # ── Synthesis – GPT-4o mini with tool results as grounded context ─────
     tool_context = ""
@@ -556,17 +580,11 @@ async def tool_executor_node(state: AgentState) -> dict:
     if pool_used_for_synthesis is None:
         # Only quiz tool was called (shadow pool); synthesis still needs visible/bonus
         try:
-            pool_used_for_synthesis = await check_and_deduct_cloud(
+            pool_used_for_synthesis = await check_pool_available(
                 session_id=state["session_id"],
-                input_tokens=0,
-                output_tokens=0,
-                model="gpt-4o-mini",
             )
         except BudgetExhaustedError:
-            # Quiz was generated but we cannot synthesise the response; return raw result
-            raw_results = "\n".join(
-                f"{k}: {v}" for k, v in tool_results.items()
-            )
+            raw_results = "\n".join(f"{k}: {v}" for k, v in tool_results.items())
             reasoning_steps = list(state.get("reasoning_steps") or [])
             return {
                 "tool_calls":       tool_calls,
@@ -577,20 +595,23 @@ async def tool_executor_node(state: AgentState) -> dict:
                 "reasoning_steps":  reasoning_steps + [f"tools_executed:{tool_calls}", "synthesis_blocked:no_budget"],
             }
 
-    res = (
-        await cloud_response(
-            synthesis_prompt,
-            model="gpt-4o-mini",
-            system_prompt=system_prompt,
-        )
-        or "I've processed your request using the available tools."
+    res = await cloud_response(
+        synthesis_prompt,
+        model="gpt-4o-mini",
+        system_prompt=system_prompt,
     )
 
     if isinstance(res, tuple):
         response_text, input_tokens, output_tokens = res
     else:
-        response_text, input_tokens, output_tokens = res, 0, 0
+        response_text, input_tokens, output_tokens = res or "", 0, 0
 
+    await deduct_cloud_actual(
+        session_id=state["session_id"],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        pool=pool_used_for_synthesis,
+    )
     await log_route_event(
         session_id=state["session_id"],
         message_id=None,
@@ -725,6 +746,7 @@ async def routing_logic(
         "category":         "",
         "confidence":       0.0,
         "requires_tool":    False,
+        "forced_tool_name": None,
         "routing_decision": "",
         "response":         "",
         "budget_pool_used": None,
