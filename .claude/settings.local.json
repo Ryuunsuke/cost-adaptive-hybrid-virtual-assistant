@@ -9,7 +9,11 @@
       "Bash(pip install *)",
       "PowerShell(& \"d:\\\\Projects\\\\CAHVA\\\\backend\\\\bevenv\\\\Scripts\\\\python.exe\" -m pip install pypdf 2>&1)",
       "Bash(Get-ChildItem \"d:\\\\Projects\\\\CAHVA\\\\backend\\\\app\\\\mcp\" -Recurse -Name)",
-      "PowerShell(Stop-Process -Name \"python\" -Force -ErrorAction SilentlyContinue)"
+      "PowerShell(Stop-Process -Name \"python\" -Force -ErrorAction SilentlyContinue)",
+      "Bash(python -c \"import app.main\")",
+      "Bash(bevenv\\\\Scripts\\\\python.exe -c \"import sys; sys.path.insert\\(0, 'app'\\); import main\")",
+      "Bash(./bevenv/Scripts/python.exe -c \"import sys; sys.path.insert\\(0,'app'\\); import main\")",
+      "Bash(./bevenv/Scripts/python.exe -c \"import pydantic; print\\(pydantic.__version__\\); import sys; print\\(sys.version\\)\")"
     ]
   }
 }

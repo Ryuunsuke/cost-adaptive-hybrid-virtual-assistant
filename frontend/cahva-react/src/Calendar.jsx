@@ -94,6 +94,7 @@ function Calendar({ userId, onBack }) {
   const today = new Date();
   const [current, setCurrent] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [events, setEvents] = useState([]);
+  const [studyEntries, setStudyEntries] = useState([]);
   const [modal, setModal] = useState(null); // null | event-like object (new or existing)
 
   const fetchEvents = () => {
@@ -103,7 +104,14 @@ function Calendar({ userId, onBack }) {
       .catch(() => {});
   };
 
-  useEffect(() => { fetchEvents(); }, [userId]);
+  const fetchStudyEntries = () => {
+    fetch(`http://localhost:8000/api/schedule/user?user_id=${userId}`)
+      .then(r => r.json())
+      .then(d => setStudyEntries(d.entries || []))
+      .catch(() => {});
+  };
+
+  useEffect(() => { fetchEvents(); fetchStudyEntries(); }, [userId]);
 
   const prevMonth = () => setCurrent(new Date(current.getFullYear(), current.getMonth() - 1, 1));
   const nextMonth = () => setCurrent(new Date(current.getFullYear(), current.getMonth() + 1, 1));
@@ -163,6 +171,15 @@ function Calendar({ userId, onBack }) {
     });
   };
 
+  const studyOnDay = (date) => {
+    if (!date) return [];
+    return studyEntries.filter(se => {
+      // se.date is 'YYYY-MM-DD' from the backend
+      const seDate = new Date(se.date + 'T00:00:00');
+      return isSameDay(seDate, date);
+    });
+  };
+
   return (
     <div className="calendar-page">
       <div className="calendar-container">
@@ -182,8 +199,9 @@ function Calendar({ userId, onBack }) {
             <div key={d} className="cal-day-header">{d}</div>
           ))}
           {cells.map((date, i) => {
-            const dayEvents = eventsOnDay(date);
-            const isToday = date && isSameDay(date, today);
+            const dayEvents  = eventsOnDay(date);
+            const dayStudy   = studyOnDay(date);
+            const isToday    = date && isSameDay(date, today);
             return (
               <div
                 key={i}
@@ -201,6 +219,20 @@ function Calendar({ userId, onBack }) {
                     {ev.title}
                   </div>
                 ))}
+                {dayStudy.map(se => {
+                  const topics = Array.isArray(se.topics) ? se.topics : [se.topics];
+                  const label  = topics[0] + (topics.length > 1 ? ` +${topics.length - 1}` : '');
+                  const tip    = `${topics.join(', ')} · ${se.duration_hours}h${se.note ? ' · ' + se.note : ''}`;
+                  return (
+                    <div
+                      key={se.id_entry}
+                      className="cal-study-chip"
+                      title={tip}
+                    >
+                      {label}
+                    </div>
+                  );
+                })}
               </div>
             );
           })}

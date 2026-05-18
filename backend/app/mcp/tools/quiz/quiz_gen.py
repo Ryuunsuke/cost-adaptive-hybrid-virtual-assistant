@@ -11,9 +11,13 @@ Parameters
 ----------
 topic          : subject string; used as sole source when no document is uploaded,
                  or as a focus hint when a document is present.
-question_count : number of questions to generate (default 5, capped at 10).
+question_count : number of questions to generate (default 10, capped at 10).
+force_regen    : skip cache and generate fresh questions (used by /api/quiz/regenerate).
+used_questions : list of previously generated question dicts; the LLM is instructed
+                 to avoid repeating these (lower effective weight on covered material).
 
-Redo: every subsequent call returns the cached questions at zero cost.
+Redo: every subsequent call returns the cached questions at zero cost unless
+force_regen=True.
 """
 
 from __future__ import annotations
@@ -47,10 +51,10 @@ async def _summarise_for_quiz(doc_text: str) -> str:
 
 def _strip_answers(quiz_data: list[dict]) -> list[dict]:
     """
-    Return questions with correct_answer removed and a positional index added.
+    Return questions with correct_answer and explanation removed, plus a positional index.
 
-    The frontend only ever receives this stripped version.  correct_answer
-    lives solely in the tool_output cache until submit_quiz_answers is called.
+    Both fields live solely in the tool_output cache and are only revealed
+    after the student submits all answers via submit_quiz_answers.
     """
     return [
         {
@@ -86,28 +90,22 @@ def _validate_quiz_schema(quiz_data: list[dict]) -> None:
 async def generate_quiz(
     session_id: int,
     topic: str = "",
-    question_count: int = 5,
+    question_count: int = 10,
+    force_regen: bool = False,
+    used_questions: list | None = None,
 ) -> str:
     """
     Generate a multiple-choice quiz from an uploaded document or a topic string.
-
-    If the session has an uploaded document, questions are drawn from it
-    (topic narrows the focus if provided).  If no document is present, topic
-    is used as the sole knowledge source and must be non-empty.
-
-    Redo behaviour
-    --------------
-    Once generated, the quiz is cached in tool_output.  Every subsequent call
-    returns the cached questions at zero cost.  Each attempt is recorded
-    separately by submit_quiz_answers.
 
     Parameters
     ----------
     session_id     : active session PK
     topic          : subject string (required when no document is uploaded)
-    question_count : number of questions to generate (default 5, max 10)
+    question_count : number of questions to generate (default 10, max 10)
+    force_regen    : bypass cache and always generate fresh questions
+    used_questions : questions to de-emphasise in the new generation
     """
-    question_count = max(1, min(int(question_count), 10))
+    question_count = max(1, min(question_count, 10))
 
     file_row = await get_session_file(session_id)
     has_document = bool(file_row and file_row.get("extracted_text"))
@@ -118,9 +116,9 @@ async def generate_quiz(
                      "Upload a document or specify a topic to generate a quiz."
         })
 
-    # ── Cache hit — valid if no file (topic-based) or file hasn't changed ──
+    # ── Cache hit — skipped when force_regen=True ──────────────────────────
     cached = await get_cached_tool_output(session_id, "generate_quiz")
-    cache_valid = cached and (
+    cache_valid = (not force_regen) and cached and (
         not has_document or cached["created_at"] >= file_row["uploaded_at"]
     )
     if cache_valid:
@@ -151,15 +149,29 @@ async def generate_quiz(
     else:
         source_block = f"Topic: {topic}"
 
+    # Build "avoid these" block when regenerating with prior questions
+    avoid_block = ""
+    if used_questions:
+        avoid_lines = "\n".join(
+            f"- {q['question']}"
+            for q in used_questions
+            if q.get("question")
+        )
+        avoid_block = (
+            f"\nThe following questions have ALREADY been used — do NOT repeat them "
+            f"or closely related questions. Cover different aspects:\n{avoid_lines}\n"
+        )
+
     prompt = f"""Generate exactly {question_count} multiple-choice questions based on the content below.
 Questions must cover different aspects — do not cluster around a single point.
-
+{avoid_block}
 Return ONLY a valid JSON array with no markdown, no explanation, no preamble.
 Each element must follow this exact schema:
 {{
   "question":      "<question text>",
   "options":       {{"A": "<option>", "B": "<option>", "C": "<option>", "D": "<option>"}},
-  "correct_answer": "<A|B|C|D>"
+  "correct_answer": "<A|B|C|D>",
+  "explanation":   "<one sentence explaining why the correct answer is right>"
 }}
 
 {source_block}"""

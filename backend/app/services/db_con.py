@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date as _date
 from typing import Optional
 
 import asyncpg  # type: ignore
@@ -231,19 +231,19 @@ CREATE TABLE IF NOT EXISTS tool_output (
 
 -- Per-request cost audit log – thesis §3.3.3, §3.4.3
 -- Debit rows: cost > 0, pool = 'visible' | 'bonus' | 'shadow'
--- Credit rows (quiz rewards): cost < 0, pool = NULL, category = 'quiz_reward'
+-- Credit rows (quiz rewards): cost < 0, pool = NULL, category = 'quiz_reward', id_model = NULL
 CREATE TABLE IF NOT EXISTS route_log (
-    id_log      SERIAL       PRIMARY KEY,
-    session_id  INT          NOT NULL REFERENCES session(id_session) ON DELETE CASCADE,
-    message_id  INT          REFERENCES message(id_message) ON DELETE SET NULL,
-    model_name  VARCHAR(80)  NOT NULL,
-    category    VARCHAR(40)  NOT NULL,
-    confidence  NUMERIC(4,3) NOT NULL DEFAULT 0,
-    input_token INT          NOT NULL DEFAULT 0,
-    output_token INT         NOT NULL DEFAULT 0,
-    cost        NUMERIC(14,8) NOT NULL DEFAULT 0,
-    pool        VARCHAR(10),     -- 'visible' | 'bonus' | 'shadow' | NULL
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    id_log       SERIAL        PRIMARY KEY,
+    session_id   INT           NOT NULL REFERENCES session(id_session) ON DELETE CASCADE,
+    message_id   INT           REFERENCES message(id_message) ON DELETE SET NULL,
+    id_model     INT           REFERENCES model(id_model),
+    category     VARCHAR(40)   NOT NULL,
+    confidence   NUMERIC(4,3)  NOT NULL DEFAULT 0,
+    input_token  INT           NOT NULL DEFAULT 0,
+    output_token INT           NOT NULL DEFAULT 0,
+    cost         NUMERIC(14,8) NOT NULL DEFAULT 0,
+    pool         VARCHAR(10),
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
 -- Quiz attempt records for Chapter 4 evaluation analytics – thesis §3.5.3
@@ -273,10 +273,8 @@ CREATE TABLE IF NOT EXISTS schedule_entry (
 
 async def bootstrap_schema() -> None:
     """
-    Run the DDL statements that create all nine tables on first run.
-
-    Safe to call on every startup: every statement uses IF NOT EXISTS and
-    INSERT … ON CONFLICT DO NOTHING, so repeated calls are idempotent.
+    Run the DDL statements that create all tables on first run, then apply
+    any one-time schema migrations (idempotent – safe to call on every startup).
 
     Call from the FastAPI lifespan startup handler, after init_db_pool():
 
@@ -286,6 +284,26 @@ async def bootstrap_schema() -> None:
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         await conn.execute(_DDL)
+        # Migrate route_log.model_name VARCHAR → id_model FK (runs once, skipped after)
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE  table_name  = 'route_log'
+                      AND  column_name = 'model_name'
+                ) THEN
+                    ALTER TABLE route_log
+                        ADD COLUMN IF NOT EXISTS id_model INT REFERENCES model(id_model);
+                    UPDATE route_log rl
+                    SET    id_model = m.id_model
+                    FROM   model m
+                    WHERE  m.model_name = rl.model_name
+                      AND  rl.id_model IS NULL;
+                    ALTER TABLE route_log DROP COLUMN model_name;
+                END IF;
+            END $$;
+        """)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -790,6 +808,34 @@ async def get_tool_output_by_id(tool_output_id: int) -> Optional[dict]:
     return result
 
 
+async def get_all_quiz_questions(session_id: int) -> list[dict]:
+    """
+    Return every question from every generate_quiz output for *session_id*.
+
+    Used by the regeneration endpoint to pass previously seen questions to the
+    LLM so it avoids repeating them (lower effective weight on covered material).
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT output_json
+            FROM   tool_output
+            WHERE  session_id = $1 AND tool_name = 'generate_quiz'
+            ORDER  BY created_at ASC
+            """,
+            session_id,
+        )
+    questions: list[dict] = []
+    for row in rows:
+        data = row["output_json"]
+        if isinstance(data, str):
+            data = json.loads(data)
+        if isinstance(data, list):
+            questions.extend(data)
+    return questions
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # quiz_attempt table
 # ════════════════════════════════════════════════════════════════════════════
@@ -845,18 +891,21 @@ async def get_route_log_for_session(session_id: int) -> list[dict]:
     Returns
     -------
     list[dict]
-        Each dict has: id_log, session_id, message_id, model_name, category,
-        confidence, input_token, output_token, cost, pool, created_at.
+        Each dict has: id_log, session_id, message_id, id_model, model_name,
+        category, confidence, input_token, output_token, cost, pool, created_at.
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id_log, session_id, message_id, model_name, category,
-                   confidence, input_token, output_token, cost, pool, created_at
-            FROM   route_log
-            WHERE  session_id = $1
-            ORDER  BY created_at ASC
+            SELECT rl.id_log, rl.session_id, rl.message_id,
+                   rl.id_model, m.model_name,
+                   rl.category, rl.confidence,
+                   rl.input_token, rl.output_token, rl.cost, rl.pool, rl.created_at
+            FROM   route_log rl
+            LEFT JOIN model m ON m.id_model = rl.id_model
+            WHERE  rl.session_id = $1
+            ORDER  BY rl.created_at ASC
             """,
             session_id,
         )
@@ -886,17 +935,19 @@ async def get_session_cost_summary(session_id: int) -> dict:
         row = await conn.fetchrow(
             """
             SELECT
-                COALESCE(SUM(cost) FILTER (WHERE cost > 0), 0)   AS total_spend,
-                COALESCE(ABS(SUM(cost) FILTER (WHERE cost < 0)), 0) AS total_reward,
-                COALESCE(SUM(cost), 0)                            AS net_cost,
-                COUNT(*) FILTER (WHERE model_name = 'llama3.2:3b') AS local_requests,
-                COUNT(*) FILTER (WHERE model_name <> 'llama3.2:3b'
-                                   AND category  <> 'quiz_reward')  AS cloud_requests,
-                COALESCE(SUM(cost) FILTER (WHERE pool = 'visible'), 0)  AS visible_pool_spend,
-                COALESCE(SUM(cost) FILTER (WHERE pool = 'bonus'),   0)  AS bonus_pool_spend,
-                COALESCE(SUM(cost) FILTER (WHERE pool = 'shadow'),  0)  AS shadow_pool_spend
-            FROM route_log
-            WHERE session_id = $1
+                COALESCE(SUM(rl.cost) FILTER (WHERE rl.cost > 0), 0)       AS total_spend,
+                COALESCE(ABS(SUM(rl.cost) FILTER (WHERE rl.cost < 0)), 0)   AS total_reward,
+                COALESCE(SUM(rl.cost), 0)                                   AS net_cost,
+                COUNT(*) FILTER (WHERE m.model_name = 'llama3.2:3b')        AS local_requests,
+                COUNT(*) FILTER (WHERE rl.id_model IS NOT NULL
+                                   AND  m.model_name <> 'llama3.2:3b'
+                                   AND  rl.category  <> 'quiz_reward')      AS cloud_requests,
+                COALESCE(SUM(rl.cost) FILTER (WHERE rl.pool = 'visible'), 0) AS visible_pool_spend,
+                COALESCE(SUM(rl.cost) FILTER (WHERE rl.pool = 'bonus'),   0) AS bonus_pool_spend,
+                COALESCE(SUM(rl.cost) FILTER (WHERE rl.pool = 'shadow'),  0) AS shadow_pool_spend
+            FROM   route_log rl
+            LEFT JOIN model m ON m.id_model = rl.id_model
+            WHERE  rl.session_id = $1
             """,
             session_id,
         )
@@ -1033,6 +1084,8 @@ def _parse_schedule_row(row) -> dict:
     created_val = d.get("created_at")
     if hasattr(created_val, "isoformat"):
         d["created_at"] = created_val.isoformat()
+    if d.get("duration_hours") is not None:
+        d["duration_hours"] = float(d["duration_hours"])
     return d
 
 
@@ -1041,13 +1094,18 @@ async def save_schedule_entries(session_id: int, entries: list[dict]) -> None:
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         for e in entries:
+            day_str = e.get("day") or ""
+            try:
+                day_obj = _date.fromisoformat(day_str)
+            except ValueError:
+                continue  # skip malformed dates
             await conn.execute(
                 """
                 INSERT INTO schedule_entry (session_id, date, topics, duration_hours, note)
-                VALUES ($1, $2::DATE, $3, $4, $5)
+                VALUES ($1, $2, $3, $4, $5)
                 """,
                 session_id,
-                e.get("day"),
+                day_obj,
                 json.dumps(e.get("topics", [])),
                 float(e.get("hours", 2.0)),
                 e.get("notes") or None,
@@ -1082,10 +1140,10 @@ async def create_schedule_entry(
         row = await conn.fetchrow(
             """
             INSERT INTO schedule_entry (session_id, date, topics, duration_hours, note)
-            VALUES ($1, $2::DATE, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id_entry, session_id, date, topics, duration_hours, note, created_at
             """,
-            session_id, date, json.dumps(topics), float(duration_hours), note,
+            session_id, _date.fromisoformat(date), json.dumps(topics), float(duration_hours), note,
         )
     return _parse_schedule_row(row)
 
@@ -1103,11 +1161,11 @@ async def update_schedule_entry(
         row = await conn.fetchrow(
             """
             UPDATE schedule_entry
-            SET    date = $3::DATE, topics = $4, duration_hours = $5, note = $6
+            SET    date = $3, topics = $4, duration_hours = $5, note = $6
             WHERE  id_entry = $1 AND session_id = $2
             RETURNING id_entry, session_id, date, topics, duration_hours, note, created_at
             """,
-            entry_id, session_id, date, json.dumps(topics), float(duration_hours), note,
+            entry_id, session_id, _date.fromisoformat(date), json.dumps(topics), float(duration_hours), note,
         )
     return _parse_schedule_row(row) if row else None
 
@@ -1120,3 +1178,21 @@ async def delete_schedule_entry(entry_id: int, session_id: int) -> bool:
             entry_id, session_id,
         )
     return result == "DELETE 1"
+
+
+async def get_user_schedule_entries(user_id: int) -> list[dict]:
+    """Return all schedule entries across every session owned by *user_id*."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT se.id_entry, se.session_id, se.date,
+                   se.topics, se.duration_hours, se.note, se.created_at
+            FROM   schedule_entry se
+            JOIN   session s ON s.id_session = se.session_id
+            WHERE  s.user_id = $1
+            ORDER  BY se.date ASC
+            """,
+            user_id,
+        )
+    return [_parse_schedule_row(r) for r in rows]

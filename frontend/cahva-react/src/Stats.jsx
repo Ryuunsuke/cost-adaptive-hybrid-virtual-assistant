@@ -3,7 +3,6 @@ import './Stats.css';
 
 function ProgressBar({ remaining, total }) {
   const pct = total > 0 ? Math.min((remaining / total) * 100, 100) : 0;
-  // Red when nearly empty, orange when low, blue when healthy
   const color = pct <= 10 ? '#dc3545' : pct <= 40 ? '#fd7e14' : '#007bff';
   return (
     <div className="progress-track">
@@ -15,12 +14,32 @@ function ProgressBar({ remaining, total }) {
 function Stats({ sessionId }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [showBonus, setShowBonus] = useState(false);
 
   const fetchStats = () => {
     setLoading(true);
     fetch(`http://localhost:8000/api/stats?session_id=${sessionId}`)
       .then(r => r.json())
-      .then(d => { setData(d); setLoading(false); })
+      .then(d => {
+        setData(d);
+        setLoading(false);
+
+        const bonus = d.budget?.quiz_bonus || 0;
+        const seenKey = `bonus_seen_${sessionId}`;
+        const seenBonus = parseFloat(localStorage.getItem(seenKey) || '0');
+
+        if (bonus > seenBonus) {
+          // New or increased bonus — show the label once, then mark as seen
+          setShowBonus(true);
+          localStorage.setItem(seenKey, String(bonus));
+        } else {
+          setShowBonus(false);
+          // Keep the stored value in sync with spending so future bonuses trigger again
+          if (bonus < seenBonus) {
+            localStorage.setItem(seenKey, String(bonus));
+          }
+        }
+      })
       .catch(() => setLoading(false));
   };
 
@@ -47,7 +66,7 @@ function Stats({ sessionId }) {
               {(Math.max(0, budget.visible_limit - budget.visible_used) + budget.quiz_bonus).toFixed(0)}
               {' / '}
               {budget.visible_limit.toFixed(0)}
-              {budget.quiz_bonus > 0 && (
+              {showBonus && (
                 <span style={{ color: '#2e7d32', fontSize: '0.82em' }}> (+{budget.quiz_bonus.toFixed(0)} bonus)</span>
               )}
             </span>

@@ -132,7 +132,7 @@ async def _extract_quiz_args(user_input: str) -> dict:
     prompt = f"""Extract quiz generation parameters from the student message below.
 Return ONLY a JSON object with exactly these keys:
   "topic":          string — the subject or topic to quiz on (empty string if not mentioned)
-  "question_count": integer — number of questions requested (default 5 if not stated, max 10)
+  "question_count": integer — number of questions requested (default 10 if not stated, max 10)
 
 Student message: "{user_input}"
 """
@@ -142,10 +142,10 @@ Student message: "{user_input}"
     if not isinstance(topic, str):
         topic = str(topic)
     try:
-        count = int(parsed.get("question_count", 5))
+        count = int(parsed.get("question_count", 10))
         count = max(1, min(count, 10))
     except (TypeError, ValueError):
-        count = 5
+        count = 10
     return {"topic": topic, "question_count": count}
 
 
@@ -212,4 +212,5 @@ Student message: "{user_input}"
 
 import tools as _mcp_tools_pkg  # noqa: E402  (mcp/ added to sys.path above)
 
+generate_quiz       = _mcp_tools_pkg.generate_quiz
 submit_quiz_answers = _mcp_tools_pkg.submit_quiz_answers

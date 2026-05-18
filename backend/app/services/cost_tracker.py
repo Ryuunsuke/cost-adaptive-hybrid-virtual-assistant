@@ -75,8 +75,8 @@ MODEL_COSTS: dict[str, dict[str, float]] = {
     "llama3.2:3b": {"input": 0.0,        "output": 0.0},
 }
 
-# Tokens credited to quiz_bonus per correct quiz answer (thesis §3.5.3)
-QUIZ_REWARD_PER_CORRECT: int = 50
+# Flat token reward credited to quiz_bonus on a perfect quiz score (thesis §3.5.3)
+PERFECT_QUIZ_REWARD: int = 500
 
 
 # ---------------------------------------------------------------------------
@@ -366,9 +366,11 @@ async def log_route_event(
         await conn.execute(
             """
             INSERT INTO route_log
-                (session_id, message_id, model_name, category, confidence,
+                (session_id, message_id, id_model, category, confidence,
                  input_token, output_token, cost, pool, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+            VALUES ($1, $2,
+                    (SELECT id_model FROM model WHERE model_name = $3),
+                    $4, $5, $6, $7, $8, $9, NOW())
             """,
             session_id,
             message_id,
@@ -411,7 +413,7 @@ async def credit_quiz_bonus(
     int
         Total tokens credited to quiz_bonus.
     """
-    bonus_tokens = correct_count * QUIZ_REWARD_PER_CORRECT
+    bonus_tokens = PERFECT_QUIZ_REWARD
     db_pool = await get_db_pool()
 
     async with db_pool.acquire() as conn:
@@ -439,13 +441,14 @@ async def credit_quiz_bonus(
                 bonus_tokens,
             )
 
-            # Log the reward in route_log as a negative-cost quiz_reward entry
+            # Log the reward in route_log as a negative-cost quiz_reward entry.
+            # id_model is NULL — quiz answer checking has no associated LLM model.
             await conn.execute(
                 """
                 INSERT INTO route_log
-                    (session_id, message_id, model_name, category, confidence,
+                    (session_id, message_id, id_model, category, confidence,
                      input_token, output_token, cost, pool, created_at)
-                VALUES ($1, NULL, 'quiz_answer_check', 'quiz_reward', 1.0,
+                VALUES ($1, NULL, NULL, 'quiz_reward', 1.0,
                         0, 0, $2, NULL, NOW())
                 """,
                 session_id,

@@ -4,6 +4,16 @@ import './QuizDisplay.css';
 const OPTIONS = ['A', 'B', 'C', 'D'];
 
 function QuizDisplay({ quiz, completed, sessionId }) {
+  const [currentQuiz, setCurrentQuiz] = useState(quiz);
+  const [displayQuestions, setDisplayQuestions] = useState(() => [...quiz.questions]);
+  const [answers, setAnswers] = useState({});
+  const [results, setResults] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [error, setError] = useState('');
+
+  const shuffle = (arr) => [...arr].sort(() => Math.random() - 0.5);
+
   if (completed) {
     return (
       <div className="quiz-display quiz-completed-card">
@@ -20,13 +30,9 @@ function QuizDisplay({ quiz, completed, sessionId }) {
     );
   }
 
-
-  const [answers, setAnswers] = useState({});
-  const [results, setResults] = useState(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState('');
-
-  const allAnswered = quiz.questions.every(q => answers[String(q.index)] !== undefined);
+  const allAnswered = displayQuestions.every(
+    q => answers[String(q.index)] !== undefined
+  );
 
   const handleSelect = (index, option) => {
     if (results) return;
@@ -42,7 +48,7 @@ function QuizDisplay({ quiz, completed, sessionId }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
-          tool_output_id: quiz.tool_output_id,
+          tool_output_id: currentQuiz.tool_output_id,
           answers,
         }),
       });
@@ -59,26 +65,54 @@ function QuizDisplay({ quiz, completed, sessionId }) {
     }
   };
 
+  const handleRegenerate = async () => {
+    setIsRegenerating(true);
+    setError('');
+    try {
+      const res = await fetch('http://localhost:8000/api/quiz/regenerate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setError(data.error);
+      } else {
+        setCurrentQuiz(data);
+        setDisplayQuestions([...data.questions]);
+        setAnswers({});
+        setResults(null);
+        setError('');
+      }
+    } catch {
+      setError('Could not regenerate the quiz.');
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
+  const isPerfect = results && results.score === results.total;
+
   return (
     <div className="quiz-display">
       <div className="quiz-header">
         <span className="quiz-title">Quiz</span>
         {results && (
-          <span className="quiz-score">
+          <span className={`quiz-score${isPerfect ? '' : ' quiz-score-partial'}`}>
             {results.score}/{results.total} &nbsp;·&nbsp; +{results.budget_reward} tokens
           </span>
         )}
       </div>
 
       <div className="quiz-questions">
-        {quiz.questions.map((q) => {
+        {displayQuestions.map((q, displayPos) => {
           const chosen = answers[String(q.index)];
           const qResult = results?.results?.find(r => r.index === q.index);
 
           return (
             <div key={q.index} className="quiz-question">
               <p className="question-text">
-                <span className="question-num">{q.index + 1}.</span> {q.question}
+                <span className="question-num">{displayPos + 1}.</span> {q.question}
               </p>
               <div className="quiz-options">
                 {OPTIONS.map(opt => {
@@ -103,6 +137,12 @@ function QuizDisplay({ quiz, completed, sessionId }) {
                   );
                 })}
               </div>
+              {qResult && !qResult.is_correct && qResult.explanation && (
+                <div className="quiz-explanation">
+                  <span className="explanation-label">Explanation:</span>{' '}
+                  {qResult.explanation}
+                </div>
+              )}
             </div>
           );
         })}
@@ -116,24 +156,49 @@ function QuizDisplay({ quiz, completed, sessionId }) {
           onClick={handleSubmit}
           disabled={!allAnswered || isSubmitting}
         >
-          {isSubmitting ? 'Submitting…' : `Submit (${Object.keys(answers).length}/${quiz.questions.length} answered)`}
+          {isSubmitting ? 'Submitting…' : `Submit (${Object.keys(answers).length}/${displayQuestions.length} answered)`}
         </button>
       )}
 
       {results && (
         <div className="quiz-results-footer">
           <p className="quiz-reward-msg">
-            {results.score === results.total
-              ? 'Perfect score!'
-              : `${results.score} correct out of ${results.total}.`}
-            {' '}+{results.budget_reward} bonus tokens added to your balance.
+            {isPerfect
+              ? 'Perfect score! +500 bonus tokens earned.'
+              : `${results.score} / ${results.total} correct — review the explanations above.`}
           </p>
-          <button
-            className="quiz-retry-btn"
-            onClick={() => { setAnswers({}); setResults(null); setError(''); }}
-          >
-            Try Again
-          </button>
+          <div className="quiz-action-row">
+            {isPerfect ? (
+              <button
+                className="quiz-regen-btn"
+                onClick={handleRegenerate}
+                disabled={isRegenerating}
+              >
+                {isRegenerating ? 'Generating…' : 'Try Again'}
+              </button>
+            ) : (
+              <>
+                <button
+                  className="quiz-retry-btn"
+                  onClick={() => {
+                    setDisplayQuestions(shuffle(currentQuiz.questions));
+                    setAnswers({});
+                    setResults(null);
+                    setError('');
+                  }}
+                >
+                  Try Again
+                </button>
+                <button
+                  className="quiz-regen-btn"
+                  onClick={handleRegenerate}
+                  disabled={isRegenerating}
+                >
+                  {isRegenerating ? 'Generating…' : 'Try New Questions'}
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>

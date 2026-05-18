@@ -13,7 +13,7 @@ from pypdf import PdfReader
 import uvicorn
 
 from services.task_router import app_instance as assistant_graph
-from services.tools import submit_quiz_answers
+from services.tools import submit_quiz_answers, generate_quiz as _generate_quiz
 from services.db_con import (
     init_db_pool, close_db_pool, bootstrap_schema,
     upsert_user, get_user_sessions, create_session, delete_session,
@@ -24,6 +24,8 @@ from services.db_con import (
     update_calendar_event, delete_calendar_event,
     get_schedule_entries, create_schedule_entry,
     update_schedule_entry, delete_schedule_entry,
+    get_user_schedule_entries,
+    get_all_quiz_questions,
 )
 
 
@@ -65,19 +67,24 @@ class QuizSubmitRequest(BaseModel):
     tool_output_id: int
     answers: dict  # {"0": "A", "1": "C", …}
 
+class QuizRegenerateRequest(BaseModel):
+    session_id: int
+    topic: str = ""
+    question_count: int = 10
+
 class CalendarEventCreate(BaseModel):
     user_id: int
     title: str
     description: str = ""
     start_date: str   # ISO-8601 string
-    end_date: str = None
+    end_date: str | None = None
 
 class CalendarEventUpdate(BaseModel):
     user_id: int
     title: str
     description: str = ""
     start_date: str
-    end_date: str = None
+    end_date: str | None = None
 
 class ScheduleEntryCreate(BaseModel):
     session_id: int
@@ -292,6 +299,12 @@ async def schedule_delete_endpoint(entry_id: int, session_id: int):
     return {"ok": ok}
 
 
+@app.get("/api/schedule/user")
+async def user_schedule_entries_endpoint(user_id: int):
+    entries = await get_user_schedule_entries(user_id)
+    return {"entries": entries}
+
+
 @app.get("/api/stats")
 async def stats_endpoint(session_id: int):
     session, summary = await asyncio.gather(
@@ -328,6 +341,20 @@ async def quiz_submit_endpoint(request: QuizSubmitRequest):
         session_id=request.session_id,
         tool_output_id=request.tool_output_id,
         answers=request.answers,
+    )
+    return _json.loads(result)
+
+
+@app.post("/api/quiz/regenerate")
+async def quiz_regenerate_endpoint(request: QuizRegenerateRequest):
+    import json as _json
+    used = await get_all_quiz_questions(request.session_id)
+    result = await _generate_quiz(
+        session_id=request.session_id,
+        topic=request.topic,
+        question_count=request.question_count,
+        force_regen=True,
+        used_questions=used,
     )
     return _json.loads(result)
 

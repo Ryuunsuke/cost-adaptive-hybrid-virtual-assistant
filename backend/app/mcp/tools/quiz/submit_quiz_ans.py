@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from services.db_con import get_tool_output_by_id, get_quiz_attempts_for_session
+from services.db_con import get_tool_output_by_id
 from services.cost_tracker import credit_quiz_bonus, save_quiz_attempt
 
 
@@ -96,18 +96,11 @@ async def submit_quiz_answers(
             "your_answer":    submitted,
             "correct_answer": correct,
             "is_correct":     is_correct,
-            "explanation":    question.get("options", {}).get(correct, ""),
+            "explanation":    question.get("explanation") or question.get("options", {}).get(correct, ""),
         })
 
-    # ── Credit quiz_bonus only for the first perfect completion ──────────
-    existing_attempts = await get_quiz_attempts_for_session(session_id)
-    already_perfect = any(
-        a["tool_output_id"] == tool_output_id and a["score"] == a["total_questions"]
-        for a in existing_attempts
-    )
-
-    if correct_count == total_questions and not already_perfect:
-        # First perfect score — give full token reward.
+    # ── Credit quiz_bonus on every perfect submission ────────────────────
+    if correct_count == total_questions:
         budget_reward = await credit_quiz_bonus(
             session_id=session_id,
             correct_count=correct_count,
@@ -116,7 +109,6 @@ async def submit_quiz_answers(
             submitted_answers=answers,
         )
     else:
-        # Retry or partial score — record attempt with no reward.
         await save_quiz_attempt(
             session_id=session_id,
             correct_count=correct_count,
@@ -126,9 +118,11 @@ async def submit_quiz_answers(
         )
         budget_reward = 0
 
+    is_perfect = correct_count == total_questions
     return json.dumps({
         "score":         correct_count,
         "total":         total_questions,
         "budget_reward": budget_reward,
         "results":       results,
+        "regen_needed":  not is_perfect,
     })
