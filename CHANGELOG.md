@@ -1,4 +1,58 @@
 # CAHVA Session Changelog
+
+---
+
+**Date:** 2026-05-20  
+**Session scope:** Bug fixes and enhancements — quiz interaction, multi-source quiz generation, markdown rendering, routing priority
+
+---
+
+## Bug Fixes
+
+| # | File | Bug | Fix |
+|---|------|-----|-----|
+| 1 | `task_router.py` | Quiz/flashcard early-return only fired when `"questions"` or `"cards"` was in the JSON, so budget-exhausted / completed / error responses still went through GPT synthesis | Made early-return unconditional: any non-empty result string bypasses synthesis |
+| 2 | `task_router.py` | `route_decision` checked `document_context` before `requires_tool`, so clicking "Generate Quiz" while sources were active sent the request to `local_generation` instead of `tool_executor` | Moved `requires_tool → tool_executor` check above `document_context → local_generation` |
+| 3 | `QuizDisplay.jsx` | `useState(() => [...quiz.questions])` crashed when `completed` prop was passed without `quiz`, breaking message rendering | Guard with `quiz ? [...quiz.questions] : []` and `quiz ?? null` |
+| 4 | `Message.css` / `Message.jsx` | Markdown responses rendered without left alignment; list markers invisible; ordered lists restarted numbering at 1 after blank lines | Added `text-align: left`, `align-items: flex-start` to `.md-body`; removed `display:flex` from list elements; added blank-line peek-ahead in ordered-list collector |
+| 5 | `main.py` | Document context text limit was `max(400, 4000 // len(files))` — only ~2 pages for a single file, causing grounded answers to miss relevant content | Raised to `max(2000, 16000 // len(files))` |
+| 6 | `local_generation_node` | Strict "ONLY from excerpts / couldn't find that" prompt caused llama3.2:3b to refuse to reason over content | Replaced with a reasoning-based prompt: model may paraphrase/explain, but should note if topic is absent |
+
+---
+
+## Enhancements
+
+### `backend/app/mcp/tools/quiz/quiz_gen.py`
+
+- **Multi-source support** — added `file_ids: list[int] | None = None` parameter. When provided, fetches text from those specific files (scoped to session), always bypasses cache (`force_regen=True`), and scales question count automatically.
+- **Question count scaling** — when `file_ids` is non-empty: `question_count = 10 + (len(source_files) - 1) * 5` (1 source → 10, 2 → 15, 3 → 20, …). Single-file / topic-only path retains the cap of 10.
+- **Combined source block** — multiple files are concatenated proportionally (`per_file = max(2000, 8000 // len(source_files))`) and summarised before the prompt.
+
+### `backend/app/mcp/tools/flashcard/flashcard_gen.py`
+
+- **Multi-source support** — added `file_ids: list[int] | None = None` parameter, mirroring the quiz implementation. When provided, combines file excerpts and forces regeneration.
+
+### `backend/app/services/tools/__init__.py`
+
+- **`ToolProxy.execute`** — passes `source_file_ids` as `file_ids` kwarg selectively to `generate_quiz` and `generate_flashcards` only (other tools do not accept this parameter).
+- **Re-export** — added `generate_flashcards = _mcp_tools_pkg.generate_flashcards`.
+
+### `frontend/cahva-react/src/FileUpload.jsx`
+
+- **"Generate Quiz" button** — sends generic `'Generate a quiz from selected sources'` message when any sources are active, instead of naming a specific file. This prevents the tool from receiving a confusing single-file hint when multiple sources are toggled.
+
+### `frontend/cahva-react/src/Message.jsx`
+
+- **Inline markdown renderer** (`MarkdownText`) — full line-by-line state machine supporting fenced code blocks, H1–H3 headings, unordered and ordered lists (with blank-line peek-ahead), paragraphs, and inline `**bold**`, `*italic*`, `` `code` ``.
+- **Detection order** updated: quiz → completed quiz → flashcard → schedule → `MarkdownText`.
+- **`BADGE_MAP`** — added `'llama3.2:3b (tool path)'` → `"Local + tools"` badge.
+
+### `frontend/cahva-react/src/Message.css`
+
+- Added full markdown style set: `.md-body`, `.md-p`, `.md-h1/h2/h3`, `.md-ul`, `.md-ol`, `.md-pre`, `.md-code`.
+
+---
+
 **Date:** 2026-05-19  
 **Session scope:** Local LLM expansion — data-aware responses, flashcard tool, document source mode
 

@@ -65,16 +65,16 @@ async def summarize_document(
 
     prompt = f"""Summarise the following academic document.{focus_instruction}
 
-Return ONLY a valid JSON object with no markdown, no preamble:
-{{
-  "title":      "<inferred document title or 'Untitled'>",
-  "key_points": ["<point 1>", "<point 2>", ...],
-  "summary":    "<2-3 paragraph summary>",
-  "conclusion": "<one paragraph conclusion>"
-}}
+    Return ONLY a valid JSON object with no markdown, no preamble:
+    {{
+    "title":      "<inferred document title or 'Untitled'>",
+    "key_points": ["<point 1>", "<point 2>", ...],
+    "summary":    "<2-3 paragraph summary>",
+    "conclusion": "<one paragraph conclusion>"
+    }}
 
-Document:
-{text}"""
+    Document:
+    {text}"""
 
     system_prompt = (
         "You are an academic summariser. Respond ONLY with a valid JSON object. "
