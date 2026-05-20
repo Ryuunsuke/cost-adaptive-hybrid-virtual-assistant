@@ -1,5 +1,131 @@
 # CAHVA Session Changelog
-**Date:** 2026-05-18  
+**Date:** 2026-05-19  
+**Session scope:** Local LLM expansion — data-aware responses, flashcard tool, document source mode
+
+---
+
+## Feature A — Data-Aware Local Responses
+
+### `backend/app/services/db_con.py`
+
+- **`get_session_context_summary(session_id)` *(new)*:**  
+  Fetches personalised context for the current session in a single round-trip:
+  - Upcoming schedule entries (next 3 dates ≥ today, sorted ASC)
+  - Last quiz attempt score and total
+  - All uploaded filenames
+  - Remaining visible tokens + quiz_bonus from the session row
+  - Returns `{"schedule": [...], "last_quiz": {...}|None, "files": [...], "budget": {...}}`
+
+- **`get_files_by_ids(session_id, file_ids)` *(new)*:**  
+  Fetches `id_file`, `filename`, `extracted_text` for a list of file IDs scoped to the given session (prevents cross-session data access).
+
+### `backend/app/services/task_router.py`
+
+- **`AgentState`** — added `document_context: Optional[str]` field.
+- **Import** — added `from services.db_con import get_session_context_summary`.
+- **`local_generation_node`** — two sub-modes:
+  - *Standard mode*: calls `get_session_context_summary` at node entry, builds a `_context_block` string (schedule, last quiz, uploaded files, remaining tokens), and prepends it to the synthesis prompt so local responses about "my schedule", "my tokens", etc. are personalised.
+  - *Grounded mode* (when `document_context` is set): uses a strict grounded prompt instructing the model to answer only from the provided file excerpts.
+- **`route_decision`** — added earliest check: if `state.get("document_context")`, return `"local_generation"` unconditionally before all category/confidence checks.
+- **`routing_logic`** — added `document_context: str | None = None` parameter; wired into initial state.
+
+---
+
+## Feature B — Flashcard Generator (Local MCP Tool)
+
+### `backend/app/mcp/tools/flashcard/__init__.py` *(new)*
+
+Re-exports `generate_flashcards`.
+
+### `backend/app/mcp/tools/flashcard/flashcard_gen.py` *(new)*
+
+- **`generate_flashcards(session_id, topic="")`** — local-only tool (llama3.2:3b), zero cost.
+- Produces 10 term/definition pairs from the uploaded document or a topic string.
+- Cache logic matches `quiz_gen.py`: valid until a new file is uploaded, or indefinitely for topic-based cards.
+- Validates each card has non-empty `term` and `definition`; retries once on parse failure.
+- Adds positional `index` to each card before saving and returning.
+- Output schema: `{ "tool_output_id": N, "cards": [{"index": 0, "term": "...", "definition": "..."}, …] }`
+
+### `backend/app/mcp/tools/__init__.py`
+
+- Added `from .flashcard import generate_flashcards` + `__all__` entry.
+
+### `backend/app/services/tools/__init__.py`
+
+- **Registry** — added `"generate_flashcards"` entry with `"args": ["topic"]`.
+- **`_extract_flashcard_args(user_input)` *(new)*:** extracts `topic` string from the student message.
+- **`_extract_args` dispatch** — wired `generate_flashcards` to `_extract_flashcard_args`.
+- **Re-export** — `generate_flashcards = _mcp_tools_pkg.generate_flashcards`.
+
+### `backend/app/services/task_router.py`
+
+- **Triage prompt** — added `generate_flashcards` to the `requires_tool` examples.
+- **`tool_executor_node`** — added flashcard early-return block (mirrors quiz early-return): if `tool_calls == ["generate_flashcards"]` and result contains `"cards"`, return raw JSON directly to the frontend without synthesis.
+- **`BADGE_MAP`** — routing decision `"llama3.2:3b (tool path)"` maps to `"Local + tools"` badge.
+
+### `frontend/cahva-react/src/FlashcardDisplay.jsx` *(new)*
+
+- Props: `{ cards }` — array of `{index, term, definition}`.
+- One card visible at a time; front = term, back = definition.
+- Click/tap the card to flip it (CSS 3D rotation).
+- Previous / Next navigation buttons; progress indicator "3 / 10".
+- "click to flip" hint shown on the front face until first interaction.
+
+### `frontend/cahva-react/src/FlashcardDisplay.css` *(new)*
+
+- `.fc-scene`, `.fc-card`, `.fc-front`, `.fc-back` — CSS 3D perspective flip.
+- `transform: rotateY(180deg)` on `.fc-card.is-flipped`; `backface-visibility: hidden`.
+- Navigation row and progress indicator styles.
+
+### `frontend/cahva-react/src/Message.jsx`
+
+- **Import** `FlashcardDisplay`.
+- **`tryParseFlashcards(text)` *(new)*:** detects JSON with `tool_output_id` + `cards[0].term`.
+- **Detection order updated:** quiz → completed quiz → flashcard → schedule → plain text.
+- **`BADGE_MAP`** — added `'llama3.2:3b (tool path)'` → `"Local + tools"` badge.
+
+---
+
+## Feature C — Document Source Mode
+
+### `backend/app/main.py`
+
+- **Import** — added `get_files_by_ids`.
+- **`ChatRequest`** — added `source_file_ids: list[int] = []`.
+- **`chat_endpoint`** — if `source_file_ids` is non-empty, calls `get_files_by_ids`, builds `document_context`:
+  ```python
+  per_file = max(400, 4000 // len(files))
+  parts = [f"[{f['filename']}]\n{f['extracted_text'][:per_file]}" for f in files]
+  document_context = "\n\n---\n\n".join(parts)
+  ```
+  Passes `document_context` in the graph initial state. If `source_file_ids` is empty, `document_context` is `None`.
+
+### `frontend/cahva-react/src/FileUpload.jsx`
+
+- **`onSourceChange` prop** — callback fired with the updated array of active `id_file` values whenever a toggle changes.
+- **`activeSourceIds` state** — initialised from `localStorage` key `doc_source_${sessionId}` on mount.
+- **`toggleSource(id_file)`** — adds or removes the file ID from `activeSourceIds`, persists to localStorage, calls `onSourceChange`.
+- **Per-file "Source" toggle button** — shown only when the file has extracted text (`char_count > 0`); styled as a pill: dark green when `source-on`, grey when `source-off`.
+- Placeholder text updated to include "Source Mode".
+
+### `frontend/cahva-react/src/FileUpload.css`
+
+- Added `.btn-source`, `.source-on`, `.source-off` — pill toggle button styles.
+
+### `frontend/cahva-react/src/Chat.jsx`
+
+- **`sourceFileIds` state** — initialised from `localStorage` key `doc_source_${sessionId}`; updated via `onSourceChange` from `FileUpload`.
+- **`handleSendMessage`** — passes `source_file_ids: sourceFileIds` in every chat fetch body.
+- **Header badge** — renders `<span className="source-mode-badge">📄 Source mode</span>` when `sourceFileIds.length > 0`.
+- **`FileUpload`** — receives `onSourceChange={setSourceFileIds}`.
+
+### `frontend/cahva-react/src/Chat.css`
+
+- Added `.source-mode-badge` — green pill badge displayed in the chat header during source mode.
+
+---
+
+## Date: 2026-05-18  
 **Session scope:** Feature additions, schema changes, and bug fixes
 
 ---

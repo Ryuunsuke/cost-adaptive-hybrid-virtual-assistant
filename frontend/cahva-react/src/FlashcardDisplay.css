@@ -1,0 +1,117 @@
+.fc-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+}
+
+.fc-progress {
+  font-size: 0.82em;
+  color: #666;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* 3-D scene container */
+.fc-scene {
+  width: 100%;
+  max-width: 420px;
+  height: 200px;
+  perspective: 900px;
+  cursor: pointer;
+}
+
+/* Card — holds both faces */
+.fc-card {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+  border-radius: 12px;
+}
+
+.fc-card.is-flipped {
+  transform: rotateY(180deg);
+}
+
+/* Shared face styles */
+.fc-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 24px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  user-select: none;
+}
+
+.fc-front {
+  background: #eef4ff;
+  border: 1.5px solid #c5d8f8;
+}
+
+.fc-back {
+  background: #f0fdf4;
+  border: 1.5px solid #bbf7d0;
+  transform: rotateY(180deg);
+}
+
+.fc-face-label {
+  font-size: 0.72em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #888;
+  margin-bottom: 10px;
+}
+
+.fc-face-text {
+  font-size: 1em;
+  color: #1a1a2e;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.fc-hint {
+  margin-top: 12px;
+  font-size: 0.72em;
+  color: #aaa;
+  font-style: italic;
+}
+
+/* Navigation row */
+.fc-nav {
+  display: flex;
+  gap: 12px;
+}
+
+.fc-nav-btn {
+  padding: 6px 18px;
+  font-size: 0.85em;
+  font-weight: 600;
+  border: 1.5px solid #007bff;
+  background: transparent;
+  color: #007bff;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.fc-nav-btn:hover:not(:disabled) {
+  background: #007bff;
+  color: #fff;
+}
+
+.fc-nav-btn:disabled {
+  border-color: #ccc;
+  color: #ccc;
+  cursor: default;
+}

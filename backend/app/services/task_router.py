@@ -24,6 +24,7 @@ from langgraph.graph import StateGraph, END  # type: ignore
 
 from services.LLMs import local_response, cloud_response
 from services.tools import get_tool, list_tools
+from services.db_con import get_session_context_summary
 from services.cost_tracker import (
     Pool,
     BudgetExhaustedError,
@@ -115,6 +116,10 @@ class AgentState(TypedDict):
     budget_pool_used:  Optional[str]   # "visible" | "bonus" | "shadow" | None
     forced_tool_name:  Optional[str]   # set by the frontend to bypass llama tool selection
 
+    # ── document source mode (Feature C) ────────────────────────────────
+    document_context:  Optional[str]   # combined text of user-selected source files; forces local grounded path
+    source_file_ids:   list            # IDs of files activated as source; passed to quiz/flashcard tools
+
     # ── evaluation / transparency fields ────────────────────────────────
     tool_calls:       list   # tool names invoked during this turn
     tool_results:     dict   # tool name → output mapping
@@ -174,7 +179,7 @@ async def triage_node(state: AgentState) -> dict:
         }}
 
         requires_tool is true only when the query explicitly needs the
-        summarize_document, generate_quiz, or create_schedule tool.
+        summarize_document, generate_quiz, generate_flashcards, or create_schedule tool.
 
         Student query: "{msg}"
     """
@@ -225,23 +230,77 @@ async def local_generation_node(state: AgentState) -> dict:
     Session history (last ≤6 turns) is included for multi-turn context.
 
     No budget pool is charged; log_route_event records cost = 0.0.
+
+    Two sub-modes:
+      - document_context set → grounded answer using only provided file excerpts
+      - otherwise → personalised answer with injected session context block
     """
     print("[LANGGRAPH]: Local Generation Path (llama3.2:3b)...")
 
     msg = _get_message(state)
-    history_block = _build_history_block(state)
+    document_context = state.get("document_context")
 
-    synthesis_prompt = f"""You are a helpful and friendly academic assistant.
-        Answer the student's request directly and naturally.
-        Do not provide hypothetical examples, meta-commentary, or templates.
-        {history_block}
-        Student request: {msg}
-    """
-    system_prompt = (
-        "You are a strict assistant. Reply with a single direct response only. "
-        "Do not include examples, hypothetical wording, or descriptions of "
-        "how the answer was generated."
-    )
+    # ── Document source mode: grounded prompt, no context injection ───────
+    if document_context:
+        synthesis_prompt = f"""You are helping a student understand their study material.
+Answer the student's question by reasoning from the document excerpts provided below.
+Base your answer on the content in the excerpts. You may paraphrase, explain, or summarise — do not invent facts not supported by the text.
+If the topic genuinely does not appear anywhere in the excerpts, say so briefly and describe what the excerpts do cover.
+
+Document excerpts:
+{document_context}
+
+Student question: {msg}
+"""
+        system_prompt = (
+            "You are a helpful study assistant. Answer from the provided document excerpts. "
+            "Reason from the content — paraphrasing and summarising are fine. "
+            "Do not fabricate facts not present in the excerpts."
+        )
+    else:
+        # ── Standard mode: inject personalised session context ────────────
+        history_block = _build_history_block(state)
+
+        try:
+            ctx = await get_session_context_summary(state["session_id"])
+            sched = ctx.get("schedule", [])
+            sched_str = (
+                ", ".join(
+                    f"{'/'.join(s['topics']) if s['topics'] else 'study'} on {s['date']}"
+                    for s in sched
+                )
+                if sched else "none scheduled"
+            )
+            lq = ctx.get("last_quiz")
+            quiz_str = f"{lq['score']} / {lq['total']}" if lq else "not attempted"
+            files = ctx.get("files", [])
+            files_str = ", ".join(f["filename"] for f in files) if files else "none"
+            budget = ctx.get("budget", {})
+            budget_str = (
+                f"{int(budget.get('visible_remaining', 0))} visible"
+                f" + {int(budget.get('quiz_bonus', 0))} bonus"
+            )
+            _context_block = (
+                f"\nStudent context:\n"
+                f"- Upcoming schedule: {sched_str}\n"
+                f"- Last quiz: {quiz_str}\n"
+                f"- Uploaded documents: {files_str}\n"
+                f"- Remaining tokens: {budget_str}\n"
+            )
+        except Exception:
+            _context_block = ""
+
+        synthesis_prompt = f"""You are a helpful and friendly academic assistant.
+Answer the student's request directly and naturally.
+Do not provide hypothetical examples, meta-commentary, or templates.
+{_context_block}{history_block}
+Student request: {msg}
+"""
+        system_prompt = (
+            "You are a strict assistant. Reply with a single direct response only. "
+            "Do not include examples, hypothetical wording, or descriptions of "
+            "how the answer was generated."
+        )
 
     res = (
         await local_response(synthesis_prompt, system_prompt=system_prompt)
@@ -531,32 +590,45 @@ async def tool_executor_node(state: AgentState) -> dict:
                 continue
 
         try:
-            result = await tool.execute(session_id=state["session_id"], user_input=msg)
+            result = await tool.execute(
+                session_id=state["session_id"],
+                user_input=msg,
+                source_file_ids=state.get("source_file_ids") or [],
+            )
             tool_results[tool_name] = result
             print(f"[LANGGRAPH]: Tool '{tool_name}' executed successfully")
         except Exception as exc:
             tool_results[tool_name] = f"Error: {exc}"
             print(f"[LANGGRAPH]: Tool '{tool_name}' failed: {exc}")
 
-    # ── Quiz early-return: skip synthesis, send raw JSON to the frontend ────
-    # The React QuizDisplay component renders interactive multiple-choice UI
-    # directly from the structured data. Synthesis would only mangle the JSON.
+    # ── Quiz / flashcard early-return: skip synthesis, send raw JSON ─────────
+    # React components render interactive UI directly from the structured data.
+    # Always bypass synthesis for these tools — even for errors/budget exhausted.
+    reasoning_steps = list(state.get("reasoning_steps") or [])
+
     if tool_calls == ["generate_quiz"]:
         quiz_str = tool_results.get("generate_quiz", "")
-        try:
-            quiz_json = json.loads(quiz_str)
-            if "questions" in quiz_json:
-                reasoning_steps = list(state.get("reasoning_steps") or [])
-                return {
-                    "tool_calls":       tool_calls,
-                    "tool_results":     tool_results,
-                    "response":         quiz_str,
-                    "routing_decision": "GPT-4o mini (tool path)",
-                    "budget_pool_used": "shadow",
-                    "reasoning_steps":  reasoning_steps + ["quiz_generated:direct_return"],
-                }
-        except (json.JSONDecodeError, TypeError):
-            pass  # fall through to synthesis so the error text gets a reply
+        if quiz_str:
+            return {
+                "tool_calls":       tool_calls,
+                "tool_results":     tool_results,
+                "response":         quiz_str,
+                "routing_decision": "GPT-4o mini (tool path)",
+                "budget_pool_used": "shadow",
+                "reasoning_steps":  reasoning_steps + ["quiz_generated:direct_return"],
+            }
+
+    if tool_calls == ["generate_flashcards"]:
+        fc_str = tool_results.get("generate_flashcards", "")
+        if fc_str:
+            return {
+                "tool_calls":       tool_calls,
+                "tool_results":     tool_results,
+                "response":         fc_str,
+                "routing_decision": "llama3.2:3b (tool path)",
+                "budget_pool_used": None,
+                "reasoning_steps":  reasoning_steps + ["flashcards_generated:direct_return"],
+            }
 
     # ── Synthesis – GPT-4o mini with tool results as grounded context ─────
     tool_context = ""
@@ -652,13 +724,19 @@ def route_decision(state: AgentState) -> str:
     category   = state.get("category", "informational")
     confidence = state.get("confidence", 0.5)
 
+    # ── Tool-required: always goes to the cloud tool executor ─────────────
+    # Must come before document_context so "Generate Quiz" with sources active
+    # still reaches the tool executor instead of local_generation.
+    if state.get("requires_tool"):
+        return "tool_executor"
+
+    # ── Document source mode: always local, grounded answer ───────────────
+    if state.get("document_context"):
+        return "local_generation"
+
     # ── Analytical: unconditional cloud escalation ────────────────────────
     if category == "analytical":
         return "cloud_complex"
-
-    # ── Tool-required: always goes to the cloud tool executor ─────────────
-    if state.get("requires_tool"):
-        return "tool_executor"
 
     # ── Administrative: threshold 0.70 ────────────────────────────────────
     if category == "administrative":
@@ -719,6 +797,8 @@ async def routing_logic(
     text: str,
     session_id: int,
     session_history: list | None = None,
+    document_context: str | None = None,
+    source_file_ids: list[int] | None = None,
 ) -> dict:
     """
     Route a student message through the cost-adaptive hybrid pipeline.
@@ -747,6 +827,8 @@ async def routing_logic(
         "confidence":       0.0,
         "requires_tool":    False,
         "forced_tool_name": None,
+        "document_context": document_context,
+        "source_file_ids":  source_file_ids or [],
         "routing_decision": "",
         "response":         "",
         "budget_pool_used": None,

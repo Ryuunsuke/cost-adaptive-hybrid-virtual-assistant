@@ -130,6 +130,35 @@
   background-color: #ceead6;
 }
 
+.btn-source {
+  font-size: 0.82rem;
+  font-weight: 700;
+  border-radius: 20px;
+  padding: 6px 14px;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.source-on {
+  background: #1b5e20;
+  color: #fff;
+}
+
+.source-on:hover {
+  background: #2e7d32;
+}
+
+.source-off {
+  background: #e0e0e0;
+  color: #666;
+}
+
+.source-off:hover {
+  background: #bdbdbd;
+  color: #333;
+}
+
 .upload-placeholder {
   flex: 1;
   display: flex;

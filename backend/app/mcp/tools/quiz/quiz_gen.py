@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 
-from services.db_con import get_cached_tool_output, get_session_file, save_tool_output, get_quiz_attempts_for_session
+from services.db_con import get_cached_tool_output, get_session_file, get_files_by_ids, save_tool_output, get_quiz_attempts_for_session
 from services.LLMs import cloud_response, local_response
 
 
@@ -93,6 +93,7 @@ async def generate_quiz(
     question_count: int = 10,
     force_regen: bool = False,
     used_questions: list | None = None,
+    file_ids: list[int] | None = None,
 ) -> str:
     """
     Generate a multiple-choice quiz from an uploaded document or a topic string.
@@ -104,11 +105,30 @@ async def generate_quiz(
     question_count : number of questions to generate (default 10, max 10)
     force_regen    : bypass cache and always generate fresh questions
     used_questions : questions to de-emphasise in the new generation
+    file_ids       : explicit list of file IDs to use as source (source mode);
+                     when provided, bypasses the single-file default and always
+                     regenerates so the output reflects the selected files.
     """
-    question_count = max(1, min(question_count, 10))
-
-    file_row = await get_session_file(session_id)
-    has_document = bool(file_row and file_row.get("extracted_text"))
+    # ── Resolve document source ───────────────────────────────────────────
+    if file_ids:
+        # Multi-file source mode — always regenerate so the quiz matches selection.
+        # Scale question count: 10 base + 5 per additional source file.
+        force_regen = True
+        source_files = [
+            f for f in await get_files_by_ids(session_id, file_ids)
+            if f.get("extracted_text")
+        ]
+        has_document = bool(source_files)
+        file_row = None
+        if has_document:
+            question_count = 10 + (len(source_files) - 1) * 5
+        else:
+            question_count = max(1, min(question_count, 10))
+    else:
+        source_files = None
+        file_row = await get_session_file(session_id)
+        has_document = bool(file_row and file_row.get("extracted_text"))
+        question_count = max(1, min(question_count, 10))
 
     if not has_document and not topic.strip():
         return json.dumps({
@@ -142,7 +162,17 @@ async def generate_quiz(
         })
 
     # ── Build knowledge source ────────────────────────────────────────────
-    if has_document:
+    if source_files:
+        # Multiple activated files — combine proportionally then summarise
+        per_file = max(2000, 8000 // len(source_files))
+        combined_raw = "\n\n---\n\n".join(
+            f"[{f['filename']}]\n{f['extracted_text'][:per_file]}"
+            for f in source_files
+        )
+        summary = await _summarise_for_quiz(combined_raw)
+        focus_line = f"Focus particularly on topics related to: {topic}.\n" if topic.strip() else ""
+        source_block = f"{focus_line}Combined document summary:\n{summary}"
+    elif has_document:
         summary = await _summarise_for_quiz(file_row["extracted_text"][:8000])
         focus_line = f"Focus particularly on topics related to: {topic}.\n" if topic.strip() else ""
         source_block = f"{focus_line}Document summary:\n{summary}"

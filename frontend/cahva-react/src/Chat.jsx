@@ -10,6 +10,11 @@ function Chat({ sessionId, username, onBack }) {
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('chat');
+  const [sourceFileIds, setSourceFileIds] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(`doc_source_${sessionId}`) || '[]');
+    } catch { return []; }
+  });
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -46,6 +51,7 @@ function Chat({ sessionId, username, onBack }) {
           session_id: sessionId,
           message: text,
           force_tool: options.forceTool ?? '',
+          source_file_ids: sourceFileIds,
         }),
       });
 
@@ -76,6 +82,9 @@ function Chat({ sessionId, username, onBack }) {
       <div className="chat-header">
         <button className="back-btn" onClick={onBack} title="Back to sessions">&#8592;</button>
         <h1>Chat Assistant</h1>
+        {sourceFileIds.length > 0 && (
+          <span className="source-mode-badge">&#128196; Source mode</span>
+        )}
         <span className="chat-username">{username}</span>
       </div>
 
@@ -117,6 +126,7 @@ function Chat({ sessionId, username, onBack }) {
             setActiveTab('chat');
             handleSendMessage(msg, opts);
           }}
+          onSourceChange={setSourceFileIds}
         />
       )}
       {activeTab === 'schedule' && <SchedulePanel sessionId={sessionId} />}

@@ -704,6 +704,110 @@ async def update_file_text(file_id: int, extracted_text: str) -> None:
         )
 
 
+async def get_files_by_ids(session_id: int, file_ids: list[int]) -> list[dict]:
+    """
+    Return file rows for the given *file_ids* scoped to *session_id*.
+
+    Scoping to session_id prevents cross-session data access if a caller
+    passes an id that belongs to a different session.
+    """
+    if not file_ids:
+        return []
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id_file, filename, extracted_text
+            FROM   file
+            WHERE  session_id = $1 AND id_file = ANY($2)
+            ORDER  BY uploaded_at ASC
+            """,
+            session_id,
+            file_ids,
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_session_context_summary(session_id: int) -> dict:
+    """
+    Return a lightweight context snapshot for *session_id*.
+
+    Used by local_generation_node to personalise responses without cloud cost.
+
+    Returns
+    -------
+    dict with keys:
+        schedule : list[dict]  upcoming schedule entries (up to 3, date >= today)
+        last_quiz: dict | None last quiz attempt {score, total}
+        files    : list[dict]  all uploaded files [{filename}]
+        budget   : dict        {visible_remaining, quiz_bonus}
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        schedule_rows = await conn.fetch(
+            """
+            SELECT date, topics
+            FROM   schedule_entry
+            WHERE  session_id = $1 AND date >= CURRENT_DATE
+            ORDER  BY date ASC
+            LIMIT  3
+            """,
+            session_id,
+        )
+        quiz_row = await conn.fetchrow(
+            """
+            SELECT score, total_questions
+            FROM   quiz_attempt
+            WHERE  session_id = $1
+            ORDER  BY submitted_at DESC
+            LIMIT  1
+            """,
+            session_id,
+        )
+        file_rows = await conn.fetch(
+            "SELECT filename FROM file WHERE session_id = $1 ORDER BY uploaded_at DESC",
+            session_id,
+        )
+        budget_row = await conn.fetchrow(
+            "SELECT daily_visible_limit, visible_used, quiz_bonus FROM session WHERE id_session = $1",
+            session_id,
+        )
+
+    schedule = []
+    for r in schedule_rows:
+        topics = r["topics"]
+        if isinstance(topics, str):
+            topics = json.loads(topics)
+        date_val = r["date"]
+        schedule.append({
+            "date":   date_val.isoformat() if hasattr(date_val, "isoformat") else str(date_val),
+            "topics": topics or [],
+        })
+
+    last_quiz = None
+    if quiz_row:
+        last_quiz = {"score": quiz_row["score"], "total": quiz_row["total_questions"]}
+
+    files = [{"filename": r["filename"]} for r in file_rows]
+
+    budget = {"visible_remaining": 0.0, "quiz_bonus": 0.0}
+    if budget_row:
+        budget = {
+            "visible_remaining": max(
+                0.0,
+                float(budget_row["daily_visible_limit"]) - float(budget_row["visible_used"]),
+            ),
+            "quiz_bonus": float(budget_row["quiz_bonus"]),
+        }
+
+    return {
+        "schedule":  schedule,
+        "last_quiz": last_quiz,
+        "files":     files,
+        "budget":    budget,
+    }
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # tool_output table  (MCP tool result cache)
 # ════════════════════════════════════════════════════════════════════════════

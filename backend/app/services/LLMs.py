@@ -30,6 +30,7 @@ from openai import AsyncOpenAI          # cloud tier
 # Primary:  remote Ollama server (Azure VM / tailscale peer)
 # Fallback: localhost (development)
 # OLLAMA_PRIMARY_URL  = os.environ.get("OLLAMA_URL",      "http://100.111.146.123:11434")
+# OLLAMA_PRIMARY_URL  = os.environ.get("OLLAMA_URL",      "http://localhost:11434")
 OLLAMA_PRIMARY_URL  = os.environ.get("OLLAMA_URL",      "http://20.251.161.66:11434")
 OLLAMA_FALLBACK_URL = os.environ.get("OLLAMA_LOCAL_URL", "http://localhost:11434")
 

@@ -4,8 +4,8 @@ import './QuizDisplay.css';
 const OPTIONS = ['A', 'B', 'C', 'D'];
 
 function QuizDisplay({ quiz, completed, sessionId }) {
-  const [currentQuiz, setCurrentQuiz] = useState(quiz);
-  const [displayQuestions, setDisplayQuestions] = useState(() => [...quiz.questions]);
+  const [currentQuiz, setCurrentQuiz] = useState(quiz ?? null);
+  const [displayQuestions, setDisplayQuestions] = useState(() => quiz ? [...quiz.questions] : []);
   const [answers, setAnswers] = useState({});
   const [results, setResults] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);

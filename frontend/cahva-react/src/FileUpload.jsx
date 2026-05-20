@@ -1,10 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
 import './FileUpload.css';
 
-function FileUpload({ sessionId, onAction }) {
+function FileUpload({ sessionId, onAction, onSourceChange }) {
   const [files, setFiles] = useState([]);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState('');
+  const [activeSourceIds, setActiveSourceIds] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(`doc_source_${sessionId}`) || '[]');
+    } catch { return []; }
+  });
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -13,6 +18,17 @@ function FileUpload({ sessionId, onAction }) {
       .then(d => { if (d.files) setFiles(d.files); })
       .catch(() => {});
   }, [sessionId]);
+
+  const toggleSource = (id_file) => {
+    setActiveSourceIds(prev => {
+      const next = prev.includes(id_file)
+        ? prev.filter(id => id !== id_file)
+        : [...prev, id_file];
+      localStorage.setItem(`doc_source_${sessionId}`, JSON.stringify(next));
+      onSourceChange?.(next);
+      return next;
+    });
+  };
 
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
@@ -69,33 +85,51 @@ function FileUpload({ sessionId, onAction }) {
 
       {files.length > 0 ? (
         <div className="file-list">
-          {files.map((f, idx) => (
-            <section key={f.id_file ?? idx} className="file-card">
-              {idx === 0 && <span className="file-active-badge">Active</span>}
-              <div className="file-name">&#128196; {f.filename}</div>
-              <div className="file-meta">{f.char_count.toLocaleString()} characters extracted</div>
-              <div className="file-actions">
-                <button
-                  className="action-btn btn-summarize"
-                  onClick={() => onAction(`Summarize the document '${f.filename}'`, { forceTool: 'summarize_document' })}
-                >
-                  Summarize
-                </button>
-                <button
-                  className="action-btn btn-quiz"
-                  onClick={() => onAction(`Generate a quiz from the document '${f.filename}'`, { forceTool: 'generate_quiz' })}
-                >
-                  Generate Quiz
-                </button>
-              </div>
-            </section>
-          ))}
+          {files.map((f, idx) => {
+            const isSource = activeSourceIds.includes(f.id_file);
+            const hasText = f.char_count > 0;
+            return (
+              <section key={f.id_file ?? idx} className="file-card">
+                {idx === 0 && <span className="file-active-badge">Active</span>}
+                <div className="file-name">&#128196; {f.filename}</div>
+                <div className="file-meta">{f.char_count.toLocaleString()} characters extracted</div>
+                <div className="file-actions">
+                  <button
+                    className="action-btn btn-summarize"
+                    onClick={() => onAction(`Summarize the document '${f.filename}'`, { forceTool: 'summarize_document' })}
+                  >
+                    Summarize
+                  </button>
+                  <button
+                    className="action-btn btn-quiz"
+                    onClick={() => onAction(
+                      activeSourceIds.length > 0
+                        ? 'Generate a quiz from selected sources'
+                        : `Generate a quiz from the document '${f.filename}'`,
+                      { forceTool: 'generate_quiz' }
+                    )}
+                  >
+                    Generate Quiz
+                  </button>
+                  {hasText && (
+                    <button
+                      className={`action-btn btn-source ${isSource ? 'source-on' : 'source-off'}`}
+                      onClick={() => toggleSource(f.id_file)}
+                      title={isSource ? 'Click to deactivate as source' : 'Click to use as local model source'}
+                    >
+                      {isSource ? 'Source ON' : 'Source OFF'}
+                    </button>
+                  )}
+                </div>
+              </section>
+            );
+          })}
         </div>
       ) : (
         !isUploading && (
           <div className="upload-placeholder">
             <p>Upload a PDF to enable document tools</p>
-            <p className="placeholder-sub">Summarize &middot; Generate Quiz</p>
+            <p className="placeholder-sub">Summarize &middot; Generate Quiz &middot; Source Mode</p>
           </div>
         )
       )}

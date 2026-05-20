@@ -26,6 +26,7 @@ from services.db_con import (
     update_schedule_entry, delete_schedule_entry,
     get_user_schedule_entries,
     get_all_quiz_questions,
+    get_files_by_ids,
 )
 
 
@@ -60,7 +61,8 @@ class NewSessionRequest(BaseModel):
 class ChatRequest(BaseModel):
     session_id: int
     message: str
-    force_tool: str = ""   # tool name to invoke directly, e.g. "summarize_document"
+    force_tool: str = ""        # tool name to invoke directly, e.g. "summarize_document"
+    source_file_ids: list[int] = []  # active source files for document-grounded local mode
 
 class QuizSubmitRequest(BaseModel):
     session_id: int
@@ -372,6 +374,18 @@ async def chat_endpoint(request: ChatRequest):
     await create_message(request.session_id, "user", request.message)
     history = await get_session_history(request.session_id, limit=10)
 
+    # ── Document source mode: build combined context from selected files ──
+    document_context: str | None = None
+    if request.source_file_ids:
+        files = await get_files_by_ids(request.session_id, request.source_file_ids)
+        if files:
+            per_file = max(2000, 16000 // len(files))
+            parts = [
+                f"[{f['filename']}]\n{(f['extracted_text'] or '')[:per_file]}"
+                for f in files
+            ]
+            document_context = "\n\n---\n\n".join(parts)
+
     initial_state = {
         "message":          request.message,
         "user_input":       request.message,
@@ -381,6 +395,8 @@ async def chat_endpoint(request: ChatRequest):
         "confidence":       0.0,
         "requires_tool":    bool(request.force_tool),
         "forced_tool_name": request.force_tool or None,
+        "document_context": document_context,
+        "source_file_ids":  request.source_file_ids,
         "routing_decision": "",
         "response":         "",
         "budget_pool_used": None,

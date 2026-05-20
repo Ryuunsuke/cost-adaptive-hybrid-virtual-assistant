@@ -63,6 +63,14 @@ _TOOL_REGISTRY: dict[str, dict] = {
         ),
         "args": ["topics", "deadline", "daily_hours"],
     },
+    "generate_flashcards": {
+        "description": (
+            "Generate 10 term/definition flashcard pairs from the student's "
+            "uploaded document or from a topic string. Use when the student asks "
+            "for flashcards, study cards, or wants to review key terms."
+        ),
+        "args": ["topic"],
+    },
 }
 
 
@@ -85,9 +93,13 @@ class ToolProxy:
     name: str
     meta: dict
 
-    async def execute(self, session_id: int, user_input: str) -> str:
+    async def execute(
+        self, session_id: int, user_input: str, source_file_ids: list[int] | None = None
+    ) -> str:
         args = await self._extract_args(user_input)
         args["session_id"] = session_id
+        if source_file_ids and self.name in ("generate_quiz", "generate_flashcards"):
+            args["file_ids"] = source_file_ids
         return await self._call_tool(**args)
 
     async def _extract_args(self, user_input: str) -> dict:
@@ -99,6 +111,8 @@ class ToolProxy:
             return await _extract_summary_args(user_input)
         elif self.name == "create_schedule":
             return await _extract_schedule_args(user_input)
+        elif self.name == "generate_flashcards":
+            return await _extract_flashcard_args(user_input)
         return {}
 
     async def _call_tool(self, **kwargs) -> str:
@@ -180,6 +194,21 @@ Student message: "{user_input}"
     return {"focus": focus if focus and str(focus).lower() != "null" else None}
 
 
+async def _extract_flashcard_args(user_input: str) -> dict:
+    prompt = f"""Extract flashcard generation parameters from the student message below.
+Return ONLY a JSON object with exactly this key:
+  "topic": string — the subject or topic to make flashcards on (empty string if not mentioned)
+
+Student message: "{user_input}"
+"""
+    raw = await local_response(prompt)
+    parsed = _parse_json_from(raw)
+    topic = parsed.get("topic", "")
+    if not isinstance(topic, str):
+        topic = str(topic)
+    return {"topic": topic}
+
+
 async def _extract_schedule_args(user_input: str) -> dict:
     prompt = f"""Extract study schedule parameters from the student message below.
 Return ONLY a JSON object with exactly these keys:
@@ -212,5 +241,6 @@ Student message: "{user_input}"
 
 import tools as _mcp_tools_pkg  # noqa: E402  (mcp/ added to sys.path above)
 
-generate_quiz       = _mcp_tools_pkg.generate_quiz
-submit_quiz_answers = _mcp_tools_pkg.submit_quiz_answers
+generate_quiz        = _mcp_tools_pkg.generate_quiz
+submit_quiz_answers  = _mcp_tools_pkg.submit_quiz_answers
+generate_flashcards  = _mcp_tools_pkg.generate_flashcards

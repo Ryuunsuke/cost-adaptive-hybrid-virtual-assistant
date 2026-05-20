@@ -44,8 +44,9 @@
   padding: 14px 18px;
   border-radius: 18px;
   word-wrap: break-word;
-  font-size: 16px;
-  line-height: 1.4;
+  font-size: 15px;
+  line-height: 1.6;
+  text-align: left;
 }
 
 .message.user .message-content {
@@ -59,6 +60,77 @@
   color: #333;
   border-bottom-left-radius: 4px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+/* ── Markdown rendering ──────────────────────────────────────────── */
+
+.md-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 0;
+  width: 100%;
+}
+
+.md-p {
+  margin: 0 0 10px 0;
+  line-height: 1.6;
+}
+
+.md-p:last-child { margin-bottom: 0; }
+
+.md-h1, .md-h2, .md-h3 {
+  margin: 4px 0 8px 0;
+  line-height: 1.3;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+.md-h1 { font-size: 1.15em; }
+.md-h2 { font-size: 1.05em; }
+.md-h3 { font-size: 0.97em; text-transform: uppercase; letter-spacing: 0.04em; color: #555; }
+
+.md-ul, .md-ol {
+  margin: 0 0 10px 0;
+  padding-left: 22px;
+}
+
+.md-ul:last-child, .md-ol:last-child { margin-bottom: 0; }
+
+.md-ul li {
+  list-style: disc;
+  line-height: 1.55;
+  margin-bottom: 4px;
+}
+
+.md-ol li {
+  list-style: decimal;
+  line-height: 1.55;
+  margin-bottom: 4px;
+}
+
+.md-pre {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  font-size: 0.85em;
+  line-height: 1.5;
+  margin: 0 0 10px 0;
+  white-space: pre;
+}
+
+.md-pre:last-child { margin-bottom: 0; }
+
+.md-code {
+  background: #f0f0f0;
+  color: #c0392b;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.88em;
+  font-family: 'Courier New', Courier, monospace;
 }
 
 /* ── Inline schedule preview ─────────────────────────────────────── */
