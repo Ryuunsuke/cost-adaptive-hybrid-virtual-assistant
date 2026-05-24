@@ -148,38 +148,58 @@ CAHVA/
 ├── backend/
 │   ├── requirements.txt
 │   └── app/
-│       ├── main.py                  # FastAPI app, all endpoints
-│       ├── .env                     # Environment variables (see setup)
+│       ├── main.py                      # FastAPI app, all endpoints
+│       ├── .env                         # Environment variables (see setup)
+│       ├── api/
+│       │   ├── dependencies.py          # Shared FastAPI dependencies
+│       │   └── routes/
+│       │       └── chat.py              # /api/chat route handler
 │       ├── services/
-│       │   ├── task_router.py       # LangGraph pipeline (triage → routing → nodes)
-│       │   ├── LLMs.py              # local_response / cloud_response wrappers
-│       │   ├── db_con.py            # asyncpg database layer
-│       │   ├── cost_tracker.py      # Budget pools, deductions, route logging
+│       │   ├── task_router.py           # LangGraph pipeline (triage → routing → nodes)
+│       │   ├── LLMs.py                  # local_response / cloud_response wrappers
+│       │   ├── db_con.py                # asyncpg database layer
+│       │   ├── cost_tracker.py          # Budget pools, deductions, route logging
 │       │   └── tools/
-│       │       └── __init__.py      # Tool registry, ToolProxy, argument extractors
+│       │       ├── __init__.py          # Tool registry, ToolProxy, argument extractors
+│       │       ├── base_tool.py         # Base class for tool implementations
+│       │       └── calculator.py        # Example utility tool
 │       └── mcp/
+│           ├── mcp_server.py            # FastMCP server setup
 │           └── tools/
-│               ├── __init__.py
+│               ├── __init__.py          # Exports all tool functions
 │               ├── summarize_doc.py
 │               ├── create_schedule.py
 │               ├── quiz/
+│               │   ├── __init__.py
 │               │   ├── quiz_gen.py
 │               │   └── submit_quiz_ans.py
 │               └── flashcard/
+│                   ├── __init__.py
 │                   └── flashcard_gen.py
 └── frontend/
     └── cahva-react/
         ├── package.json
         └── src/
-            ├── App.jsx
-            ├── Chat.jsx / Chat.css
-            ├── Message.jsx / Message.css
-            ├── FileUpload.jsx / FileUpload.css
-            ├── QuizDisplay.jsx / QuizDisplay.css
-            ├── FlashcardDisplay.jsx / FlashcardDisplay.css
-            ├── SchedulePanel.jsx / SchedulePanel.css
-            ├── Calendar.jsx / Calendar.css
-            └── Stats.jsx
+            ├── App.jsx / App.css        # Root component and layout
+            ├── main.jsx / index.css     # Entry point and global styles
+            ├── assets/
+            └── components/
+                ├── auth/
+                │   └── UsernamePrompt   # Login screen
+                ├── chat/
+                │   ├── Chat             # Main chat view and message list
+                │   ├── ChatInput        # Message input bar
+                │   ├── Message          # Single message renderer
+                │   └── FileUpload       # PDF upload and source toggles
+                ├── schedule/
+                │   ├── SchedulePanel    # Schedule tab
+                │   └── Calendar         # Monthly calendar view
+                ├── session/
+                │   └── SessionList      # Session picker sidebar
+                └── widgets/
+                    ├── QuizDisplay      # Interactive quiz renderer
+                    ├── FlashcardDisplay # Flip-card deck renderer
+                    └── Stats            # Budget and usage dashboard
 ```
 
 ---
@@ -196,7 +216,6 @@ CAHVA/
 ### 1. Clone the repository
 ```bash
 git clone https://github.com/Ryuunsuke/cost-adaptive-hybrid-virtual-assistant.git
-
 cd CAHVA
 ```
 
@@ -252,3 +271,113 @@ Each session has three token pools:
 | **Quiz bonus** | Earned by getting a perfect quiz score (+500 per perfect submission) | Earned in-session |
 
 The local model (llama3.2:3b) costs nothing and is used whenever the triage classifier is confident enough.
+
+---
+
+## Adding a New MCP Tool
+
+Adding a tool requires changes in four places. The example below adds a hypothetical `explain_concept` tool.
+
+### Step 1 — Write the tool function
+
+Create `backend/app/mcp/tools/explain_concept.py`:
+
+```python
+import json
+from services.LLMs import cloud_response   # or local_response for zero-cost tools
+from services.db_con import get_session_files
+
+async def explain_concept(session_id: int, concept: str = "", **_) -> str:
+    # Optionally load uploaded document text as context
+    files = await get_session_files(session_id)
+    context = files[0]["extracted_text"][:3000] if files else ""
+
+    prompt = f"Explain the concept '{concept}' clearly and concisely."
+    if context:
+        prompt += f"\n\nDocument context:\n{context}"
+
+    result = await cloud_response(prompt)
+    return json.dumps({"explanation": result})
+```
+
+### Step 2 — Export it from the MCP tools package
+
+In `backend/app/mcp/tools/__init__.py`, add:
+
+```python
+from .explain_concept import explain_concept   # add this line
+
+__all__ = [
+    ...,
+    "explain_concept",                          # add this line
+]
+```
+
+### Step 3 — Register it in the tool registry
+
+In `backend/app/services/tools/__init__.py`, add an entry to `_TOOL_REGISTRY`:
+
+```python
+"explain_concept": {
+    "description": (
+        "Explain a concept or term in plain language. Use when the student "
+        "asks what something means or wants a concept broken down."
+    ),
+    "args": ["concept"],
+},
+```
+
+Then add an argument extractor function:
+
+```python
+async def _extract_explain_args(user_input: str) -> dict:
+    prompt = f"""Extract the concept to explain from the student message below.
+Return ONLY a JSON object with exactly this key:
+  "concept": string — the term or concept to explain
+
+Student message: "{user_input}"
+"""
+    raw = await local_response(prompt)
+    parsed = _parse_json_from(raw)
+    return {"concept": parsed.get("concept", user_input)}
+```
+
+And wire it into `ToolProxy._extract_args`:
+
+```python
+async def _extract_args(self, user_input: str) -> dict:
+    ...
+    elif self.name == "explain_concept":
+        return await _extract_explain_args(user_input)
+    ...
+```
+
+### Step 4 — (Optional) Add a frontend renderer
+
+If the tool returns structured JSON that needs custom rendering, add a detection branch in `frontend/cahva-react/src/components/chat/Message.jsx`:
+
+```jsx
+// Inside the component, alongside the quiz/flashcard detection blocks:
+const tryParseExplanation = (text) => {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed?.explanation) return parsed;
+  } catch { /* not JSON */ }
+  return null;
+};
+
+// In the render:
+const explanation = tryParseExplanation(content);
+if (explanation) return <div className="explanation">{explanation.explanation}</div>;
+```
+
+If the tool just returns a plain text string, `Message.jsx` will render it as a normal assistant message with no changes needed.
+
+### Summary checklist
+
+| # | File | What to add |
+|---|------|-------------|
+| 1 | `mcp/tools/your_tool.py` | The async tool function |
+| 2 | `mcp/tools/__init__.py` | Import + `__all__` entry |
+| 3 | `services/tools/__init__.py` | Registry entry + arg extractor + `_extract_args` branch |
+| 4 | `components/chat/Message.jsx` | JSON renderer (only if tool returns structured output) |
