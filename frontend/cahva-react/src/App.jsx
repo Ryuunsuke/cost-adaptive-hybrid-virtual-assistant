@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import UsernamePrompt from './UsernamePrompt';
-import SessionList from './SessionList';
-import Calendar from './Calendar';
-import Chat from './Chat';
+import UsernamePrompt from './components/auth/UsernamePrompt';
+import SessionList from './components/session/SessionList';
+import Calendar from './components/schedule/Calendar';
+import Chat from './components/chat/Chat';
 import './App.css';
 
 function App() {

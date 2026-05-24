@@ -1,4 +1,5 @@
 import asyncio
+import time
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -405,7 +406,10 @@ async def chat_endpoint(request: ChatRequest):
         "reasoning_steps":  [],
     }
 
+    _t0 = time.perf_counter()
     final_result = await assistant_graph.ainvoke(initial_state)
+    total_ms = round((time.perf_counter() - _t0) * 1000)
+
     reply = final_result["response"]
     await create_message(request.session_id, "assistant", reply)
 
@@ -413,6 +417,8 @@ async def chat_endpoint(request: ChatRequest):
         "reply":            reply,
         "routing_decision": final_result.get("routing_decision"),
         "budget_pool_used": final_result.get("budget_pool_used"),
+        "total_ms":         total_ms,
+        "timings":          final_result.get("timings", {}),
     }
 
 

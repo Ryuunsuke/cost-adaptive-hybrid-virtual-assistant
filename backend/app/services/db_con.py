@@ -1,33 +1,3 @@
-"""
-db_con.py
----------
-asyncpg database layer for the cost-adaptive academic assistant (thesis §3.3.3).
-
-Responsibilities
-----------------
-* Manage the single application-wide asyncpg connection pool (init / get / close).
-* Expose typed CRUD functions for every table in the nine-table schema:
-      user, session, role, message, tool_output, file,
-      quiz_attempt, route_log, model
-* Provide the DDL bootstrap that creates all tables on first run.
-
-What this file does NOT do
---------------------------
-* No budget pool arithmetic  → cost_tracker.py
-* No routing logic           → task_router.py
-* No LLM calls               → services/ollama_router.py
-
-Import convention
------------------
-    from db_con import get_db_pool          # used by cost_tracker.py
-    from db_con import (                    # used by FastAPI endpoints
-        create_session, get_session,
-        create_message, get_session_history,
-        save_tool_output, get_cached_tool_output,
-        ...
-    )
-"""
-
 from __future__ import annotations
 
 import json
@@ -37,46 +7,14 @@ from typing import Optional
 
 import asyncpg  # type: ignore
 
-# ---------------------------------------------------------------------------
-# Default budget constants used when creating a new session.
-# Shadow reserve is sized to cover at least one full quiz generation call so
-# the student can always access the quiz tool (thesis §3.4.3).
-# ---------------------------------------------------------------------------
 DEFAULT_DAILY_VISIBLE_LIMIT: float = 5000.0   # token-equivalent units
 DEFAULT_SHADOW_RESERVE:       float = 500.0    # hidden; quiz-gen only
 
-# ---------------------------------------------------------------------------
 # Module-level pool singleton
-# ---------------------------------------------------------------------------
 _pool: Optional[asyncpg.Pool] = None
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Pool lifecycle
-# ════════════════════════════════════════════════════════════════════════════
-
 async def init_db_pool(dsn: Optional[str] = None) -> asyncpg.Pool:
-    """
-    Create and store the asyncpg connection pool.
-
-    Call once from the FastAPI lifespan startup handler:
-
-        @asynccontextmanager
-        async def lifespan(app: FastAPI):
-            await init_db_pool()
-            yield
-            await close_db_pool()
-
-    Parameters
-    ----------
-    dsn : PostgreSQL connection string.
-        Falls back to the DATABASE_URL environment variable if not supplied.
-
-    Returns
-    -------
-    asyncpg.Pool
-        The newly created pool (also stored as the module singleton).
-    """
     global _pool
     connection_string = dsn or os.environ.get("DATABASE_URL")
     if not connection_string:
@@ -93,14 +31,6 @@ async def init_db_pool(dsn: Optional[str] = None) -> asyncpg.Pool:
 
 
 async def get_db_pool() -> asyncpg.Pool:
-    """
-    Return the application-wide connection pool.
-
-    Raises
-    ------
-    RuntimeError
-        If called before init_db_pool().
-    """
     if _pool is None:
         raise RuntimeError(
             "Database pool is not initialised. "
@@ -110,11 +40,6 @@ async def get_db_pool() -> asyncpg.Pool:
 
 
 async def close_db_pool() -> None:
-    """
-    Gracefully close all pool connections.
-
-    Call from the FastAPI lifespan shutdown handler.
-    """
     global _pool
     if _pool is not None:
         await _pool.close()
@@ -126,7 +51,6 @@ async def close_db_pool() -> None:
 # ════════════════════════════════════════════════════════════════════════════
 
 _DDL = """
--- Reference: model pricing (mirrors MODEL_COSTS in cost_tracker.py)
 CREATE TABLE IF NOT EXISTS model (
     id_model        SERIAL       PRIMARY KEY,
     model_name      VARCHAR(80)  NOT NULL UNIQUE,
@@ -134,7 +58,6 @@ CREATE TABLE IF NOT EXISTS model (
     output_cost_per_token NUMERIC(14,10) NOT NULL DEFAULT 0
 );
 
--- Seed the three models used by the router on first run
 INSERT INTO model (model_name, input_cost_per_token, output_cost_per_token)
 VALUES
     ('llama3.2:3b',  0,            0           ),
@@ -142,17 +65,12 @@ VALUES
     ('gpt-4o',       0.00000500,   0.00001500  )
 ON CONFLICT (model_name) DO NOTHING;
 
--- User accounts (proof-of-concept identity model – thesis §3.3.3)
--- Multiple users are supported; each is identified by username alone.
--- No password or email is stored. A new row is created automatically the
--- first time a username is submitted (upsert-on-connect pattern).
 CREATE TABLE IF NOT EXISTS "user" (
     id_user     SERIAL      PRIMARY KEY,
     username    VARCHAR(80) NOT NULL UNIQUE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Message role lookup (user | assistant | system)
 CREATE TABLE IF NOT EXISTS role (
     id_role     SERIAL      PRIMARY KEY,
     role_name   VARCHAR(20) NOT NULL UNIQUE
@@ -162,14 +80,6 @@ INSERT INTO role (role_name)
 VALUES ('user'), ('assistant'), ('system')
 ON CONFLICT (role_name) DO NOTHING;
 
--- Session: the central record linking all budget pools (thesis §3.3.3)
--- Three-pool budget fields (thesis §3.4.3):
---   daily_visible_limit / visible_used  → shown in the UI status bar
---   shadow_reserve / shadow_used        → hidden; quiz-gen only
---   quiz_bonus                          → earned overflow; persists across resets
--- Reset anchor fields:
---   depleted_at    → recorded on first visible-pool exhaustion in a cycle
---   next_reset_at  → depleted_at + 24 h (or midnight UTC if never depleted)
 CREATE TABLE IF NOT EXISTS session (
     id_session          SERIAL       PRIMARY KEY,
     user_id             INT          NOT NULL REFERENCES "user"(id_user) ON DELETE CASCADE,
@@ -179,11 +89,11 @@ CREATE TABLE IF NOT EXISTS session (
     daily_visible_limit NUMERIC(12,4) NOT NULL DEFAULT 5000,
     visible_used        NUMERIC(12,4) NOT NULL DEFAULT 0,
 
-    -- Shadow reserve pool (quiz generation only)
+    -- Shadow reserve pool
     shadow_reserve      NUMERIC(12,4) NOT NULL DEFAULT 500,
     shadow_used         NUMERIC(12,4) NOT NULL DEFAULT 0,
 
-    -- Earned bonus pool (quiz answer rewards, persists across resets)
+    -- Earned bonus pool
     quiz_bonus          NUMERIC(12,4) NOT NULL DEFAULT 0,
 
     -- Reset anchors
@@ -200,7 +110,7 @@ CREATE TABLE IF NOT EXISTS message (
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- Uploaded student documents (one active file per session)
+-- Uploaded student documents
 CREATE TABLE IF NOT EXISTS file (
     id_file         SERIAL       PRIMARY KEY,
     session_id      INT          NOT NULL REFERENCES session(id_session) ON DELETE CASCADE,
@@ -220,7 +130,7 @@ CREATE TABLE IF NOT EXISTS calendar_event (
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- MCP tool result cache (quiz, summary, schedule) – thesis §3.5
+-- MCP tool result cache
 CREATE TABLE IF NOT EXISTS tool_output (
     id_tool         SERIAL       PRIMARY KEY,
     session_id      INT          NOT NULL REFERENCES session(id_session) ON DELETE CASCADE,
@@ -229,9 +139,7 @@ CREATE TABLE IF NOT EXISTS tool_output (
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- Per-request cost audit log – thesis §3.3.3, §3.4.3
--- Debit rows: cost > 0, pool = 'visible' | 'bonus' | 'shadow'
--- Credit rows (quiz rewards): cost < 0, pool = NULL, category = 'quiz_reward', id_model = NULL
+-- Per-request cost audit log
 CREATE TABLE IF NOT EXISTS route_log (
     id_log       SERIAL        PRIMARY KEY,
     session_id   INT           NOT NULL REFERENCES session(id_session) ON DELETE CASCADE,
@@ -246,7 +154,7 @@ CREATE TABLE IF NOT EXISTS route_log (
     created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
--- Quiz attempt records for Chapter 4 evaluation analytics – thesis §3.5.3
+-- Quiz attempt records
 CREATE TABLE IF NOT EXISTS quiz_attempt (
     id_attempt      SERIAL        PRIMARY KEY,
     session_id      INT           NOT NULL REFERENCES session(id_session) ON DELETE CASCADE,
@@ -258,7 +166,7 @@ CREATE TABLE IF NOT EXISTS quiz_attempt (
     submitted_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
--- Session-scoped study schedule entries (tool-generated or manually created)
+-- Session-scoped study schedule entries
 CREATE TABLE IF NOT EXISTS schedule_entry (
     id_entry        SERIAL        PRIMARY KEY,
     session_id      INT           NOT NULL REFERENCES session(id_session) ON DELETE CASCADE,
@@ -270,21 +178,12 @@ CREATE TABLE IF NOT EXISTS schedule_entry (
 );
 """
 
-
+# Runs the above DDL on startup to create tables
 async def bootstrap_schema() -> None:
-    """
-    Run the DDL statements that create all tables on first run, then apply
-    any one-time schema migrations (idempotent – safe to call on every startup).
-
-    Call from the FastAPI lifespan startup handler, after init_db_pool():
-
-        await init_db_pool()
-        await bootstrap_schema()
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         await conn.execute(_DDL)
-        # Migrate route_log.model_name VARCHAR → id_model FK (runs once, skipped after)
+        # Migrate route_log.model_name VARCHAR to id_model FK
         await conn.execute("""
             DO $$
             BEGIN
@@ -305,37 +204,7 @@ async def bootstrap_schema() -> None:
             END $$;
         """)
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# user table
-# ════════════════════════════════════════════════════════════════════════════
-# Proof-of-concept identity model (thesis §3.3.3).
-# Multiple users are supported. Each user is identified by username only —
-# no password or email is stored.  The upsert-on-connect pattern means the
-# frontend calls upsert_user() once when a person enters their username;
-# the function returns the existing row for returning users or creates a new
-# one for first-time users, with no separate registration step required.
-
 async def upsert_user(username: str) -> dict:
-    """
-    Return the user row for *username*, creating it if it does not exist.
-
-    This implements the upsert-on-connect pattern described in thesis §3.3.3:
-    the frontend prompts for a username once per connection; the backend calls
-    this function, which resolves returning users and registers new ones in a
-    single round-trip.
-
-    Parameters
-    ----------
-    username : the string entered by the user in the frontend prompt.
-
-    Returns
-    -------
-    dict
-        The user row: {id_user, username, created_at}.
-        is_new is not returned; callers that need to distinguish first-time
-        users from returning users should compare created_at against NOW().
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -348,7 +217,6 @@ async def upsert_user(username: str) -> dict:
             username,
         )
     return dict(row)
-
 
 async def get_user_by_id(user_id: int) -> Optional[dict]:
     """
@@ -363,7 +231,6 @@ async def get_user_by_id(user_id: int) -> Optional[dict]:
             user_id,
         )
     return dict(row) if row else None
-
 
 async def get_user_by_username(username: str) -> Optional[dict]:
     """
@@ -380,33 +247,12 @@ async def get_user_by_username(username: str) -> Optional[dict]:
         )
     return dict(row) if row else None
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# session table
-# ════════════════════════════════════════════════════════════════════════════
-
 async def create_session(
     user_id: int,
     daily_visible_limit: float = DEFAULT_DAILY_VISIBLE_LIMIT,
     shadow_reserve: float      = DEFAULT_SHADOW_RESERVE,
 ) -> dict:
-    """
-    Create a new chat session for *user_id*.
 
-    A midnight-UTC reset anchor is set immediately so that students who never
-    exhaust their visible budget still receive a daily replenishment (thesis §3.4.3).
-
-    Parameters
-    ----------
-    user_id             : FK → user.id_user
-    daily_visible_limit : token-equivalent units shown in the UI status bar
-    shadow_reserve      : hidden allocation reserved exclusively for quiz generation
-
-    Returns
-    -------
-    dict
-        Full session row including all budget fields.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -427,13 +273,7 @@ async def create_session(
         )
     return dict(row)
 
-
 async def get_session(session_id: int) -> Optional[dict]:
-    """
-    Fetch the full session row by primary key.
-
-    Returns None if the session does not exist.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -442,13 +282,7 @@ async def get_session(session_id: int) -> Optional[dict]:
         )
     return dict(row) if row else None
 
-
 async def get_user_sessions(user_id: int) -> list[dict]:
-    """
-    Return all sessions belonging to *user_id*, newest first.
-
-    Used by the session history panel in the React UI.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -459,11 +293,6 @@ async def get_user_sessions(user_id: int) -> list[dict]:
 
 
 async def delete_session(session_id: int) -> None:
-    """
-    Permanently delete a session and all its messages (CASCADE).
-
-    Called when the user removes a session from the session list in the UI.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -473,17 +302,6 @@ async def delete_session(session_id: int) -> None:
 
 
 async def get_sessions_due_for_reset() -> list[int]:
-    """
-    Return the id_session of every session whose next_reset_at ≤ NOW().
-
-    Called by the FastAPI background polling task every 60 seconds.
-    The task passes each returned id to cost_tracker.run_daily_reset().
-
-    Returns
-    -------
-    list[int]
-        Session IDs that need their visible_used and shadow_used zeroed.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -496,17 +314,7 @@ async def get_sessions_due_for_reset() -> list[int]:
         )
     return [r["id_session"] for r in rows]
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# role table
-# ════════════════════════════════════════════════════════════════════════════
-
 async def get_role_by_name(role_name: str) -> Optional[dict]:
-    """
-    Return the role row for *role_name* ('user' | 'assistant' | 'system').
-
-    Returns None if the role is not found (should not happen after bootstrap).
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -515,38 +323,11 @@ async def get_role_by_name(role_name: str) -> Optional[dict]:
         )
     return dict(row) if row else None
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# message table
-# ════════════════════════════════════════════════════════════════════════════
-
 async def create_message(
     session_id: int,
     role_name: str,
     content: str,
 ) -> dict:
-    """
-    Persist one message turn and return the new row.
-
-    The role is resolved by name ('user' | 'assistant' | 'system') so callers
-    do not need to know the internal role_id.
-
-    Parameters
-    ----------
-    session_id : FK → session.id_session
-    role_name  : 'user' | 'assistant' | 'system'
-    content    : raw message text
-
-    Returns
-    -------
-    dict
-        The new message row (id_message, session_id, role_id, content, created_at).
-
-    Raises
-    ------
-    ValueError
-        If role_name is not found in the role table.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         role_row = await conn.fetchrow(
@@ -557,9 +338,9 @@ async def create_message(
 
         row = await conn.fetchrow(
             """
-            INSERT INTO message (session_id, role_id, content)
-            VALUES ($1, $2, $3)
-            RETURNING id_message, session_id, role_id, content, created_at
+                INSERT INTO message (session_id, role_id, content)
+                VALUES ($1, $2, $3)
+                RETURNING id_message, session_id, role_id, content, created_at
             """,
             session_id,
             role_row["id_role"],
@@ -567,36 +348,23 @@ async def create_message(
         )
     return dict(row)
 
-
 async def get_session_history(
     session_id: int,
     limit: int = 6,
 ) -> list[dict]:
-    """
-    Return the most recent *limit* message turns for *session_id*.
-
-    Each dict includes role_name (resolved via JOIN) so callers can pass the
-    result directly to the session_history field in AgentState.
-
-    Returns
-    -------
-    list[dict]
-        Messages in chronological order, each with keys:
-        id_message, role (str), content, created_at.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT m.id_message,
-                   r.role_name  AS role,
-                   m.content,
-                   m.created_at
-            FROM   message m
-            JOIN   role    r ON r.id_role = m.role_id
-            WHERE  m.session_id = $1
-            ORDER  BY m.created_at DESC
-            LIMIT  $2
+                SELECT m.id_message,
+                    r.role_name  AS role,
+                    m.content,
+                    m.created_at
+                FROM   message m
+                JOIN   role    r ON r.id_role = m.role_id
+                WHERE  m.session_id = $1
+                ORDER  BY m.created_at DESC
+                LIMIT  $2
             """,
             session_id,
             limit,
@@ -604,42 +372,18 @@ async def get_session_history(
     # Reverse so the list is chronological (oldest first)
     return [dict(r) for r in reversed(rows)]
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# file table
-# ════════════════════════════════════════════════════════════════════════════
-
 async def save_file(
     session_id: int,
     filename: str,
     extracted_text: Optional[str] = None,
 ) -> dict:
-    """
-    Persist an uploaded document for *session_id*.
-
-    Only one file is expected per session (the tools use get_session_file to
-    look it up).  Multiple uploads are allowed; the tools always use the most
-    recently uploaded file (get_session_file returns the newest row).
-
-    Parameters
-    ----------
-    session_id     : FK → session.id_session
-    filename       : original upload filename
-    extracted_text : plain-text content extracted from the document (may be
-                     None if extraction is deferred or the file is binary).
-
-    Returns
-    -------
-    dict
-        The new file row (id_file, session_id, filename, extracted_text, uploaded_at).
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO file (session_id, filename, extracted_text)
-            VALUES ($1, $2, $3)
-            RETURNING id_file, session_id, filename, extracted_text, uploaded_at
+                INSERT INTO file (session_id, filename, extracted_text)
+                VALUES ($1, $2, $3)
+                RETURNING id_file, session_id, filename, extracted_text, uploaded_at
             """,
             session_id,
             filename,
@@ -647,54 +391,36 @@ async def save_file(
         )
     return dict(row)
 
-
 async def get_session_file(session_id: int) -> Optional[dict]:
-    """
-    Return the most recently uploaded file for *session_id*.
-
-    Used by the quiz-generation and summarise-document tools to obtain
-    extracted_text without requiring the caller to pass the file explicitly.
-
-    Returns None if no file has been uploaded for this session.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id_file, session_id, filename, extracted_text, uploaded_at
-            FROM   file
-            WHERE  session_id = $1
-            ORDER  BY uploaded_at DESC
-            LIMIT  1
+                SELECT id_file, session_id, filename, extracted_text, uploaded_at
+                FROM   file
+                WHERE  session_id = $1
+                ORDER  BY uploaded_at DESC
+                LIMIT  1
             """,
             session_id,
         )
     return dict(row) if row else None
 
-
 async def get_session_files(session_id: int) -> list[dict]:
-    """Return all files uploaded for *session_id*, newest first."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id_file, session_id, filename, extracted_text, uploaded_at
-            FROM   file
-            WHERE  session_id = $1
-            ORDER  BY uploaded_at DESC
+                SELECT id_file, session_id, filename, extracted_text, uploaded_at
+                FROM   file
+                WHERE  session_id = $1
+                ORDER  BY uploaded_at DESC
             """,
             session_id,
         )
     return [dict(r) for r in rows]
 
-
 async def update_file_text(file_id: int, extracted_text: str) -> None:
-    """
-    Backfill extracted_text on an existing file row.
-
-    Called when text extraction is performed asynchronously after the initial
-    upload (e.g. after a PDF parsing worker completes).
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -703,64 +429,43 @@ async def update_file_text(file_id: int, extracted_text: str) -> None:
             file_id,
         )
 
-
 async def get_files_by_ids(session_id: int, file_ids: list[int]) -> list[dict]:
-    """
-    Return file rows for the given *file_ids* scoped to *session_id*.
-
-    Scoping to session_id prevents cross-session data access if a caller
-    passes an id that belongs to a different session.
-    """
     if not file_ids:
         return []
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id_file, filename, extracted_text
-            FROM   file
-            WHERE  session_id = $1 AND id_file = ANY($2)
-            ORDER  BY uploaded_at ASC
+                SELECT id_file, filename, extracted_text
+                FROM   file
+                WHERE  session_id = $1 AND id_file = ANY($2)
+                ORDER  BY uploaded_at ASC
             """,
             session_id,
             file_ids,
         )
     return [dict(r) for r in rows]
 
-
 async def get_session_context_summary(session_id: int) -> dict:
-    """
-    Return a lightweight context snapshot for *session_id*.
-
-    Used by local_generation_node to personalise responses without cloud cost.
-
-    Returns
-    -------
-    dict with keys:
-        schedule : list[dict]  upcoming schedule entries (up to 3, date >= today)
-        last_quiz: dict | None last quiz attempt {score, total}
-        files    : list[dict]  all uploaded files [{filename}]
-        budget   : dict        {visible_remaining, quiz_bonus}
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         schedule_rows = await conn.fetch(
             """
-            SELECT date, topics
-            FROM   schedule_entry
-            WHERE  session_id = $1 AND date >= CURRENT_DATE
-            ORDER  BY date ASC
-            LIMIT  3
+                SELECT date, topics
+                FROM   schedule_entry
+                WHERE  session_id = $1 AND date >= CURRENT_DATE
+                ORDER  BY date ASC
+                LIMIT  3
             """,
             session_id,
         )
         quiz_row = await conn.fetchrow(
             """
-            SELECT score, total_questions
-            FROM   quiz_attempt
-            WHERE  session_id = $1
-            ORDER  BY submitted_at DESC
-            LIMIT  1
+                SELECT score, total_questions   
+                FROM   quiz_attempt
+                WHERE  session_id = $1
+                ORDER  BY submitted_at DESC
+                LIMIT  1
             """,
             session_id,
         )
@@ -807,41 +512,18 @@ async def get_session_context_summary(session_id: int) -> dict:
         "budget":    budget,
     }
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# tool_output table  (MCP tool result cache)
-# ════════════════════════════════════════════════════════════════════════════
-
 async def save_tool_output(
     session_id: int,
     tool_name: str,
     output_data: dict | list,
 ) -> dict:
-    """
-    Persist a tool result as JSONB and return the new cache row.
-
-    Subsequent calls to get_cached_tool_output within the same session return
-    this row instead of re-invoking the LLM, avoiding redundant token spend
-    (thesis §3.5).
-
-    Parameters
-    ----------
-    session_id  : FK → session.id_session
-    tool_name   : 'generate_quiz' | 'summarize_document' | 'create_schedule'
-    output_data : the structured result from the MCP tool (dict or list)
-
-    Returns
-    -------
-    dict
-        The new tool_output row (id_tool, session_id, tool_name, output_json, created_at).
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO tool_output (session_id, tool_name, output_json)
-            VALUES ($1, $2, $3)
-            RETURNING id_tool, session_id, tool_name, output_json, created_at
+                INSERT INTO tool_output (session_id, tool_name, output_json)
+                VALUES ($1, $2, $3)
+                RETURNING id_tool, session_id, tool_name, output_json, created_at
             """,
             session_id,
             tool_name,
@@ -852,29 +534,20 @@ async def save_tool_output(
     result["output_json"] = json.loads(result["output_json"])
     return result
 
-
 async def get_cached_tool_output(
     session_id: int,
     tool_name: str,
 ) -> Optional[dict]:
-    """
-    Return the most recent cached result for *tool_name* within *session_id*.
-
-    The quiz answer-submission endpoint uses this to retrieve stored correct
-    answers without an LLM call (thesis §3.5.3).
-
-    Returns None if no cached output exists for this tool in this session.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id_tool, session_id, tool_name, output_json, created_at
-            FROM   tool_output
-            WHERE  session_id = $1
-              AND  tool_name  = $2
-            ORDER  BY created_at DESC
-            LIMIT  1
+                SELECT id_tool, session_id, tool_name, output_json, created_at
+                FROM   tool_output
+                WHERE  session_id = $1
+                AND  tool_name  = $2
+                ORDER  BY created_at DESC
+                LIMIT  1
             """,
             session_id,
             tool_name,
@@ -885,23 +558,14 @@ async def get_cached_tool_output(
     result["output_json"] = json.loads(result["output_json"])
     return result
 
-
 async def get_tool_output_by_id(tool_output_id: int) -> Optional[dict]:
-    """
-    Fetch a specific tool_output row by primary key.
-
-    Used by credit_quiz_bonus in cost_tracker.py to verify the tool_output_id
-    FK before inserting a quiz_attempt row.
-
-    Returns None if the row does not exist.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id_tool, session_id, tool_name, output_json, created_at
-            FROM   tool_output
-            WHERE  id_tool = $1
+                SELECT id_tool, session_id, tool_name, output_json, created_at
+                FROM   tool_output
+                WHERE  id_tool = $1
             """,
             tool_output_id,
         )
@@ -911,22 +575,15 @@ async def get_tool_output_by_id(tool_output_id: int) -> Optional[dict]:
     result["output_json"] = json.loads(result["output_json"])
     return result
 
-
 async def get_all_quiz_questions(session_id: int) -> list[dict]:
-    """
-    Return every question from every generate_quiz output for *session_id*.
-
-    Used by the regeneration endpoint to pass previously seen questions to the
-    LLM so it avoids repeating them (lower effective weight on covered material).
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT output_json
-            FROM   tool_output
-            WHERE  session_id = $1 AND tool_name = 'generate_quiz'
-            ORDER  BY created_at ASC
+                SELECT output_json
+                FROM   tool_output
+                WHERE  session_id = $1 AND tool_name = 'generate_quiz'
+                ORDER  BY created_at ASC
             """,
             session_id,
         )
@@ -939,34 +596,17 @@ async def get_all_quiz_questions(session_id: int) -> list[dict]:
             questions.extend(data)
     return questions
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# quiz_attempt table
-# ════════════════════════════════════════════════════════════════════════════
-
 async def get_quiz_attempts_for_session(session_id: int) -> list[dict]:
-    """
-    Return all quiz attempts for *session_id*, newest first.
-
-    Used in the Chapter 4 evaluation to compare sessions by quiz engagement
-    level and correlate attempt count with effective cost per session.
-
-    Returns
-    -------
-    list[dict]
-        Each dict has: id_attempt, session_id, tool_output_id, submitted_answers,
-        score, total_questions, budget_reward, submitted_at.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id_attempt, session_id, tool_output_id,
-                   submitted_answers, score, total_questions,
-                   budget_reward, submitted_at
-            FROM   quiz_attempt
-            WHERE  session_id = $1
-            ORDER  BY submitted_at DESC
+                SELECT id_attempt, session_id, tool_output_id,
+                    submitted_answers, score, total_questions,
+                    budget_reward, submitted_at
+                FROM   quiz_attempt
+                WHERE  session_id = $1
+                ORDER  BY submitted_at DESC
             """,
             session_id,
         )
@@ -979,129 +619,69 @@ async def get_quiz_attempts_for_session(session_id: int) -> list[dict]:
         results.append(row_dict)
     return results
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# route_log table  (read-only queries – writes live in cost_tracker.py)
-# ════════════════════════════════════════════════════════════════════════════
-
 async def get_route_log_for_session(session_id: int) -> list[dict]:
-    """
-    Return all route_log rows for *session_id*, oldest first.
-
-    Provides the per-request cost breakdown used in the Chapter 4 evaluation
-    metrics: total spend, cost split between local and cloud, pool distribution,
-    and effective cost after quiz-reward credits.
-
-    Returns
-    -------
-    list[dict]
-        Each dict has: id_log, session_id, message_id, id_model, model_name,
-        category, confidence, input_token, output_token, cost, pool, created_at.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT rl.id_log, rl.session_id, rl.message_id,
-                   rl.id_model, m.model_name,
-                   rl.category, rl.confidence,
-                   rl.input_token, rl.output_token, rl.cost, rl.pool, rl.created_at
-            FROM   route_log rl
-            LEFT JOIN model m ON m.id_model = rl.id_model
-            WHERE  rl.session_id = $1
-            ORDER  BY rl.created_at ASC
+                SELECT rl.id_log, rl.session_id, rl.message_id,
+                    rl.id_model, m.model_name,
+                    rl.category, rl.confidence,
+                    rl.input_token, rl.output_token, rl.cost, rl.pool, rl.created_at
+                FROM   route_log rl
+                LEFT JOIN model m ON m.id_model = rl.id_model
+                WHERE  rl.session_id = $1
+                ORDER  BY rl.created_at ASC
             """,
             session_id,
         )
     return [dict(r) for r in rows]
 
-
 async def get_session_cost_summary(session_id: int) -> dict:
-    """
-    Aggregate cost metrics for *session_id* in a single DB round-trip.
-
-    Used by the Chapter 4 evaluation to compute:
-      - total_spend         : sum of all positive cost entries
-      - total_reward        : absolute sum of all negative cost entries (quiz credits)
-      - net_cost            : total_spend - total_reward  (effective cost)
-      - local_requests      : count of llama3.2:3b route_log rows (cost = 0)
-      - cloud_requests      : count of GPT-4o / GPT-4o mini rows
-      - visible_pool_spend  : spend drawn from the visible pool
-      - bonus_pool_spend    : spend drawn from the quiz-bonus pool
-      - shadow_pool_spend   : spend drawn from the shadow reserve
-
-    Returns
-    -------
-    dict with the keys listed above.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT
-                COALESCE(SUM(rl.cost) FILTER (WHERE rl.cost > 0), 0)       AS total_spend,
-                COALESCE(ABS(SUM(rl.cost) FILTER (WHERE rl.cost < 0)), 0)   AS total_reward,
-                COALESCE(SUM(rl.cost), 0)                                   AS net_cost,
-                COUNT(*) FILTER (WHERE m.model_name = 'llama3.2:3b')        AS local_requests,
-                COUNT(*) FILTER (WHERE rl.id_model IS NOT NULL
-                                   AND  m.model_name <> 'llama3.2:3b'
-                                   AND  rl.category  <> 'quiz_reward')      AS cloud_requests,
-                COALESCE(SUM(rl.cost) FILTER (WHERE rl.pool = 'visible'), 0) AS visible_pool_spend,
-                COALESCE(SUM(rl.cost) FILTER (WHERE rl.pool = 'bonus'),   0) AS bonus_pool_spend,
-                COALESCE(SUM(rl.cost) FILTER (WHERE rl.pool = 'shadow'),  0) AS shadow_pool_spend
-            FROM   route_log rl
-            LEFT JOIN model m ON m.id_model = rl.id_model
-            WHERE  rl.session_id = $1
+                SELECT
+                    COALESCE(SUM(rl.cost) FILTER (WHERE rl.cost > 0), 0)       AS total_spend,
+                    COALESCE(ABS(SUM(rl.cost) FILTER (WHERE rl.cost < 0)), 0)   AS total_reward,
+                    COALESCE(SUM(rl.cost), 0)                                   AS net_cost,
+                    COUNT(*) FILTER (WHERE m.model_name = 'llama3.2:3b')        AS local_requests,
+                    COUNT(*) FILTER (WHERE rl.id_model IS NOT NULL
+                                    AND  m.model_name <> 'llama3.2:3b'
+                                    AND  rl.category  <> 'quiz_reward')      AS cloud_requests,
+                    COALESCE(SUM(rl.cost) FILTER (WHERE rl.pool = 'visible'), 0) AS visible_pool_spend,
+                    COALESCE(SUM(rl.cost) FILTER (WHERE rl.pool = 'bonus'),   0) AS bonus_pool_spend,
+                    COALESCE(SUM(rl.cost) FILTER (WHERE rl.pool = 'shadow'),  0) AS shadow_pool_spend
+                FROM   route_log rl
+                LEFT JOIN model m ON m.id_model = rl.id_model
+                WHERE  rl.session_id = $1
             """,
             session_id,
         )
     return dict(row)
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# model table  (reference data – read only after bootstrap)
-# ════════════════════════════════════════════════════════════════════════════
-
 async def get_model(model_name: str) -> Optional[dict]:
-    """
-    Return the model reference row for *model_name*.
-
-    Used when the router needs to look up pricing dynamically rather than
-    relying on the in-process MODEL_COSTS dict in cost_tracker.py.
-
-    Returns None if *model_name* is not in the model table.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id_model, model_name,
-                   input_cost_per_token, output_cost_per_token
-            FROM   model
-            WHERE  model_name = $1
+                SELECT id_model, model_name,
+                    input_cost_per_token, output_cost_per_token
+                FROM   model
+                WHERE  model_name = $1
             """,
             model_name,
         )
     return dict(row) if row else None
 
-
 async def list_models() -> list[dict]:
-    """
-    Return all rows from the model table.
-
-    Useful for admin endpoints that expose pricing information.
-    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id_model, model_name, input_cost_per_token, output_cost_per_token FROM model ORDER BY id_model"
         )
     return [dict(r) for r in rows]
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# calendar_event table
-# ════════════════════════════════════════════════════════════════════════════
 
 async def create_calendar_event(
     user_id: int,
@@ -1114,29 +694,27 @@ async def create_calendar_event(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO calendar_event (user_id, title, description, start_date, end_date)
-            VALUES ($1, $2, $3, $4::TIMESTAMPTZ, $5::TIMESTAMPTZ)
-            RETURNING id_event, user_id, title, description, start_date, end_date, created_at
+                INSERT INTO calendar_event (user_id, title, description, start_date, end_date)
+                VALUES ($1, $2, $3, $4::TIMESTAMPTZ, $5::TIMESTAMPTZ)
+                RETURNING id_event, user_id, title, description, start_date, end_date, created_at
             """,
             user_id, title, description, start_date, end_date,
         )
     return dict(row)
-
 
 async def get_calendar_events(user_id: int) -> list[dict]:
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id_event, user_id, title, description, start_date, end_date, created_at
-            FROM   calendar_event
-            WHERE  user_id = $1
-            ORDER  BY start_date ASC
+                SELECT id_event, user_id, title, description, start_date, end_date, created_at
+                FROM   calendar_event
+                WHERE  user_id = $1
+                ORDER  BY start_date ASC
             """,
             user_id,
         )
     return [dict(r) for r in rows]
-
 
 async def update_calendar_event(
     event_id: int,
@@ -1150,16 +728,15 @@ async def update_calendar_event(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            UPDATE calendar_event
-            SET    title = $3, description = $4,
-                   start_date = $5::TIMESTAMPTZ, end_date = $6::TIMESTAMPTZ
-            WHERE  id_event = $1 AND user_id = $2
-            RETURNING id_event, user_id, title, description, start_date, end_date, created_at
+                UPDATE calendar_event
+                SET    title = $3, description = $4,
+                    start_date = $5::TIMESTAMPTZ, end_date = $6::TIMESTAMPTZ
+                WHERE  id_event = $1 AND user_id = $2
+                RETURNING id_event, user_id, title, description, start_date, end_date, created_at
             """,
             event_id, user_id, title, description, start_date, end_date,
         )
     return dict(row) if row else None
-
 
 async def delete_calendar_event(event_id: int, user_id: int) -> bool:
     pool = await get_db_pool()
@@ -1169,11 +746,6 @@ async def delete_calendar_event(event_id: int, user_id: int) -> bool:
             event_id, user_id,
         )
     return result == "DELETE 1"
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# schedule_entry table  (session-scoped study schedule)
-# ════════════════════════════════════════════════════════════════════════════
 
 def _parse_schedule_row(row) -> dict:
     d = dict(row)
@@ -1192,9 +764,7 @@ def _parse_schedule_row(row) -> dict:
         d["duration_hours"] = float(d["duration_hours"])
     return d
 
-
 async def save_schedule_entries(session_id: int, entries: list[dict]) -> None:
-    """Bulk-insert schedule day entries produced by the create_schedule tool."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         for e in entries:
@@ -1205,8 +775,8 @@ async def save_schedule_entries(session_id: int, entries: list[dict]) -> None:
                 continue  # skip malformed dates
             await conn.execute(
                 """
-                INSERT INTO schedule_entry (session_id, date, topics, duration_hours, note)
-                VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO schedule_entry (session_id, date, topics, duration_hours, note)
+                    VALUES ($1, $2, $3, $4, $5)
                 """,
                 session_id,
                 day_obj,
@@ -1215,9 +785,7 @@ async def save_schedule_entries(session_id: int, entries: list[dict]) -> None:
                 e.get("notes") or None,
             )
 
-
 async def get_schedule_entries(session_id: int) -> list[dict]:
-    """Return all schedule entries for *session_id*, sorted by date."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -1231,7 +799,6 @@ async def get_schedule_entries(session_id: int) -> list[dict]:
         )
     return [_parse_schedule_row(r) for r in rows]
 
-
 async def create_schedule_entry(
     session_id: int,
     date: str,
@@ -1243,14 +810,13 @@ async def create_schedule_entry(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO schedule_entry (session_id, date, topics, duration_hours, note)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id_entry, session_id, date, topics, duration_hours, note, created_at
+                INSERT INTO schedule_entry (session_id, date, topics, duration_hours, note)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id_entry, session_id, date, topics, duration_hours, note, created_at
             """,
             session_id, _date.fromisoformat(date), json.dumps(topics), float(duration_hours), note,
         )
     return _parse_schedule_row(row)
-
 
 async def update_schedule_entry(
     entry_id: int,
@@ -1264,15 +830,14 @@ async def update_schedule_entry(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            UPDATE schedule_entry
-            SET    date = $3, topics = $4, duration_hours = $5, note = $6
-            WHERE  id_entry = $1 AND session_id = $2
-            RETURNING id_entry, session_id, date, topics, duration_hours, note, created_at
+                UPDATE schedule_entry
+                SET    date = $3, topics = $4, duration_hours = $5, note = $6
+                WHERE  id_entry = $1 AND session_id = $2
+                RETURNING id_entry, session_id, date, topics, duration_hours, note, created_at
             """,
             entry_id, session_id, _date.fromisoformat(date), json.dumps(topics), float(duration_hours), note,
         )
     return _parse_schedule_row(row) if row else None
-
 
 async def delete_schedule_entry(entry_id: int, session_id: int) -> bool:
     pool = await get_db_pool()
@@ -1283,19 +848,17 @@ async def delete_schedule_entry(entry_id: int, session_id: int) -> bool:
         )
     return result == "DELETE 1"
 
-
 async def get_user_schedule_entries(user_id: int) -> list[dict]:
-    """Return all schedule entries across every session owned by *user_id*."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT se.id_entry, se.session_id, se.date,
-                   se.topics, se.duration_hours, se.note, se.created_at
-            FROM   schedule_entry se
-            JOIN   session s ON s.id_session = se.session_id
-            WHERE  s.user_id = $1
-            ORDER  BY se.date ASC
+                SELECT se.id_entry, se.session_id, se.date,
+                    se.topics, se.duration_hours, se.note, se.created_at
+                FROM   schedule_entry se
+                JOIN   session s ON s.id_session = se.session_id
+                WHERE  s.user_id = $1
+                ORDER  BY se.date ASC
             """,
             user_id,
         )

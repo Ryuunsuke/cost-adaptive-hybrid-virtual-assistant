@@ -1,14 +1,3 @@
-"""
-tools/quiz/submit_quiz_answers.py
-----------------------------------
-MCP tool: submit_quiz_answers  (thesis §3.5.3)
-Budget pool: none — zero token cost, pure in-memory evaluation.
-
-Validates all 10 answers in one submission, returns per-question feedback,
-and credits quiz_bonus for each correct answer via cost_tracker.
-Correct answers are only revealed AFTER all questions are answered.
-"""
-
 from __future__ import annotations
 
 import json
@@ -16,52 +5,14 @@ import json
 from services.db_con import get_tool_output_by_id
 from services.cost_tracker import credit_quiz_bonus, save_quiz_attempt
 
-
+# validate submitted answers against cached quiz, return per-question feedback and credit quiz_bonus if all correct
 async def submit_quiz_answers(
     session_id: int,
     tool_output_id: int,
     answers: dict[str, str],
 ) -> str:
-    """
-    Validate all quiz answers and return per-question feedback.
-
-    All 10 answers must be submitted together.  Partial submissions are
-    rejected so that the student cannot probe for correct answers one at a
-    time.  Correct answers are only included in the response after the full
-    submission is received and evaluated.
-
-    This call costs zero tokens: correct answers are retrieved from the
-    tool_output cache and the comparison is performed in memory.
-
-    Parameters
-    ----------
-    session_id     : active session PK
-    tool_output_id : the id_tool value returned by generate_quiz
-    answers        : {"0": "A", "1": "C", …}  (question index → chosen option)
-
-    Returns
-    -------
-    str
-        JSON object:
-        {
-          "score":         int,
-          "total":         int,
-          "budget_reward": int,   ← tokens credited (50 × correct count)
-          "results": [
-            {
-              "index":          0,
-              "question":       str,
-              "your_answer":    "A",
-              "correct_answer": "B",
-              "is_correct":     false,
-              "explanation":    str   ← text of the correct option
-            },
-            …
-          ]
-        }
-        Returns {"error": str} on invalid input.
-    """
-    # ── Retrieve cached quiz (with correct answers) ───────────────────────
+    
+    # retrieve the quiz data from cache
     cached = await get_tool_output_by_id(tool_output_id)
     if not cached or cached["session_id"] != session_id:
         return json.dumps({"error": "Quiz not found. Please generate a quiz first."})
@@ -69,7 +20,7 @@ async def submit_quiz_answers(
     quiz_data       = cached["output_json"]
     total_questions = len(quiz_data)
 
-    # ── Require all answers before revealing results ──────────────────────
+    # require an answer for every question before evaluating
     if len(answers) < total_questions:
         missing = total_questions - len(answers)
         return json.dumps({
@@ -79,7 +30,7 @@ async def submit_quiz_answers(
             )
         })
 
-    # ── Evaluate ──────────────────────────────────────────────────────────
+    # evaluate submitted answers
     results       = []
     correct_count = 0
 
@@ -99,7 +50,7 @@ async def submit_quiz_answers(
             "explanation":    question.get("explanation") or question.get("options", {}).get(correct, ""),
         })
 
-    # ── Credit quiz_bonus on every perfect submission ────────────────────
+    # credit quiz_bonus if all correct
     if correct_count == total_questions:
         budget_reward = await credit_quiz_bonus(
             session_id=session_id,
@@ -109,6 +60,7 @@ async def submit_quiz_answers(
             submitted_answers=answers,
         )
     else:
+        # save the attempt for record-keeping and potential partial rewards
         await save_quiz_attempt(
             session_id=session_id,
             correct_count=correct_count,

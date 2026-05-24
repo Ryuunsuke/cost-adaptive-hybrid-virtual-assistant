@@ -85,32 +85,65 @@ function FileUpload({ sessionId, onAction, onSourceChange }) {
 
       {files.length > 0 ? (
         <div className="file-list">
+          {activeSourceIds.length > 1 && (
+            <div className="multi-source-bar">
+              <span className="multi-source-label">
+                {activeSourceIds.length} files in source mode
+              </span>
+              <div className="multi-source-actions">
+                <button
+                  className="action-btn btn-summarize"
+                  onClick={() => onAction(
+                    `Summarize all ${activeSourceIds.length} active source documents`,
+                    { forceTool: 'summarize_document', sourceFileIds: activeSourceIds }
+                  )}
+                >
+                  Summarize All
+                </button>
+                <button
+                  className="action-btn btn-quiz"
+                  onClick={() => onAction(
+                    'Generate a quiz from selected sources',
+                    { forceTool: 'generate_quiz' }
+                  )}
+                >
+                  Generate Quiz
+                </button>
+              </div>
+            </div>
+          )}
           {files.map((f, idx) => {
             const isSource = activeSourceIds.includes(f.id_file);
             const hasText = f.char_count > 0;
+            const singleSource = activeSourceIds.length === 1;
             return (
               <section key={f.id_file ?? idx} className="file-card">
                 {idx === 0 && <span className="file-active-badge">Active</span>}
                 <div className="file-name">&#128196; {f.filename}</div>
                 <div className="file-meta">{f.char_count.toLocaleString()} characters extracted</div>
                 <div className="file-actions">
-                  <button
-                    className="action-btn btn-summarize"
-                    onClick={() => onAction(`Summarize the document '${f.filename}'`, { forceTool: 'summarize_document' })}
-                  >
-                    Summarize
-                  </button>
-                  <button
-                    className="action-btn btn-quiz"
-                    onClick={() => onAction(
-                      activeSourceIds.length > 0
-                        ? 'Generate a quiz from selected sources'
-                        : `Generate a quiz from the document '${f.filename}'`,
-                      { forceTool: 'generate_quiz' }
-                    )}
-                  >
-                    Generate Quiz
-                  </button>
+                  {isSource && singleSource && (
+                    <button
+                      className="action-btn btn-summarize"
+                      onClick={() => onAction(
+                        `Summarize the document '${f.filename}'`,
+                        { forceTool: 'summarize_document', sourceFileIds: [f.id_file] }
+                      )}
+                    >
+                      Summarize
+                    </button>
+                  )}
+                  {isSource && singleSource && (
+                    <button
+                      className="action-btn btn-quiz"
+                      onClick={() => onAction(
+                        'Generate a quiz from selected sources',
+                        { forceTool: 'generate_quiz' }
+                      )}
+                    >
+                      Generate Quiz
+                    </button>
+                  )}
                   {hasText && (
                     <button
                       className={`action-btn btn-source ${isSource ? 'source-on' : 'source-off'}`}

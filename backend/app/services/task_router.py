@@ -1,23 +1,8 @@
-"""
-task_router.py
---------------
-LangGraph routing pipeline for the cost-adaptive hybrid assistant (thesis §3.4).
-
-Graph topology
---------------
-triage → [route_decision] → local_generation   (llama3.2:3b, zero cost)
-                          → cloud_standard      (GPT-4o mini, visible/bonus pool)
-                          → cloud_complex       (GPT-4o, visible/bonus pool)
-                          → tool_executor       (GPT-4o mini; quiz-gen → shadow pool)
-
-Budget enforcement is delegated entirely to cost_tracker.py.
-No monetary logic lives in this file.
-"""
-
 from __future__ import annotations
 
 import json
 import re
+import time
 from typing import TypedDict, Literal, Optional
 
 from langgraph.graph import StateGraph, END  # type: ignore
@@ -34,20 +19,10 @@ from services.cost_tracker import (
     log_route_event,
 )
 
-# ---------------------------------------------------------------------------
-# Confidence threshold constants (thesis §3.4.2 – Confidence Threshold Policy)
-#
-# Administrative tasks have a bounded, predictable output structure with
-# low factual-recall risk → threshold 0.70.
-#
-# Informational tasks carry higher factual risk; llama3.2:3b scores 63.4% on
-# MMLU, so a stricter threshold guards against domain-specific errors → 0.85.
-# The 15-point gap encodes the asymmetric risk profiles of the two categories.
-# ---------------------------------------------------------------------------
 CONFIDENCE_THRESHOLD_ADMINISTRATIVE: float = 0.70
 CONFIDENCE_THRESHOLD_INFORMATIONAL:  float = 0.85
 
-# Tool name that draws from the shadow reserve (thesis §3.4.3, §3.5.3)
+# Tool name that draws from the shadow reserve
 SHADOW_RESERVE_TOOL: str = "generate_quiz"
 
 # Sentinel returned to the frontend when a budget pool is exhausted
@@ -61,17 +36,12 @@ _SHADOW_EXHAUSTED_MSG = (
     "Please try again after your budget resets."
 )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _extract_json_block(text: str) -> str:
     """Strip markdown fences and return the first JSON-looking substring."""
     text = text.strip()
     text = re.sub(r"```(?:json)?", "", text).strip("`").strip()
     match = re.search(r"\{.*\}", text, re.DOTALL)
     return match.group(0) if match else text
-
 
 def _get_message(state: "AgentState") -> str:
     """
@@ -83,7 +53,6 @@ def _get_message(state: "AgentState") -> str:
     """
     return state.get("message") or state.get("user_input") or ""  # type: ignore[attr-defined]
 
-
 def _build_history_block(state: "AgentState") -> str:
     """Format the last ≤6 conversation turns as a prompt block."""
     turns = (state.get("session_history") or [])[-6:]
@@ -94,62 +63,35 @@ def _build_history_block(state: "AgentState") -> str:
     )
     return f"\nConversation history:\n{lines}\n"
 
-
-# ---------------------------------------------------------------------------
-# Agent State
-# ---------------------------------------------------------------------------
 class AgentState(TypedDict):
     # ── backward-compatible alias (original field name used by FastAPI) ──
     user_input: str
 
-    # ── core routing fields (thesis §3.4.1) ─────────────────────────────
-    message:          str    # raw student input (preferred name)
+    message:          str    # raw student input
     session_history:  list   # last ≤6 conversation turns
-    session_id:       int    # FK → session.id_session (required for budget checks)
+    session_id:       int    # FK to session.id_session
     category:         str    # "administrative" | "informational" | "analytical"
     confidence:       float  # 0.0–1.0, produced by llama3.2:3b classifier
-    requires_tool:    bool   # True → route to tool_executor regardless of category
-    routing_decision: str    # which path/model was selected (set by conditional edge)
+    requires_tool:    bool   # True then route to tool_executor regardless of category
+    routing_decision: str    # which path/model was selected
     response:         str    # final answer returned to the student
 
-    # ── budget transparency fields (thesis §3.4.3) ───────────────────────
     budget_pool_used:  Optional[str]   # "visible" | "bonus" | "shadow" | None
     forced_tool_name:  Optional[str]   # set by the frontend to bypass llama tool selection
 
-    # ── document source mode (Feature C) ────────────────────────────────
     document_context:  Optional[str]   # combined text of user-selected source files; forces local grounded path
     source_file_ids:   list            # IDs of files activated as source; passed to quiz/flashcard tools
 
-    # ── evaluation / transparency fields ────────────────────────────────
     tool_calls:       list   # tool names invoked during this turn
     tool_results:     dict   # tool name → output mapping
     reasoning_steps:  list   # breadcrumb trail for debugging / evaluation
+    timings:          dict   # wall-clock ms per node/tool
 
-
-# ---------------------------------------------------------------------------
-# Node 1 – Triage (classification)
-#
-# Uses llama3.2:3b (local, zero cost) to classify the student message into one
-# of three task categories and produce a confidence score plus a tool-need flag.
-# 100% structured JSON compliance at Q4_K_M quantisation (thesis §2.1.1).
-# (Sections 3.1.2, 3.4.1)
-# ---------------------------------------------------------------------------
+# local classifier
 async def triage_node(state: AgentState) -> dict:
-    """
-    llama3.2:3b classifies the student query into:
-      category      : administrative | informational | analytical
-      confidence    : float 0–1
-      requires_tool : bool (True when summarise_document / generate_quiz /
-                             create_schedule tool output is expected)
 
-    Category definitions (thesis §3.4.1):
-      administrative  – scheduling, reminders, deadlines, study plans
-      informational   – explain, summarise, define, find, generate quiz/flashcard
-      analytical      – analyse, evaluate, compare, debug, write/draft argument
+    _t0 = time.perf_counter()
 
-    Classification is local-only (llama3.2:3b via Ollama) and carries no
-    monetary cost; the budget check only applies from Node 2 onwards.
-    """
     # Frontend explicitly flagged this as a tool call — skip LLM triage.
     if state.get("requires_tool"):
         print("[LANGGRAPH]: Triage skipped — force_tool pre-classified.")
@@ -158,33 +100,43 @@ async def triage_node(state: AgentState) -> dict:
             "confidence":      1.0,
             "requires_tool":   True,
             "reasoning_steps": ["triaged:pre_classified"],
+            "timings":         {**state.get("timings", {}), "triage_ms": 0},
         }
 
     print("[LANGGRAPH]: Triaging (llama3.2:3b classification)...")
 
     msg = _get_message(state)
 
-    prompt = f"""Classify the student query below and respond with ONLY a valid JSON object.
+    prompt = f"""Classify the student query below. Respond with ONLY a valid JSON object — no markdown, no explanation.
 
-        Category definitions:
-        "administrative" - scheduling, reminders, deadlines, study plans
-        "informational"  - explain, summarise, define, find, generate quiz or flashcard
-        "analytical"     - analyse, evaluate, compare, debug, write or draft argument
+        Categories (pick exactly one):
+          "administrative" — scheduling, reminders, deadlines, study plans, calendar tasks
+          "informational"  — explain what something is, define a term, describe how something works, list facts
+          "analytical"     — critically evaluate, compare options, assess trade-offs, argue pros/cons, analyse implications
 
-        Required JSON format (no extra keys, no markdown):
+        Confidence calibration:
+          0.90–1.00  query fits its category clearly (e.g. "What is X?", "Set a reminder for ...")
+          0.75–0.89  clear category, moderate complexity
+          0.50–0.74  genuinely uncertain about the right category
+
+        Use "analytical" when the query contains ANY of these signals:
+          critically, evaluate, assess, compare, contrast, versus, trade-off, trade-offs,
+          pros and cons, advantages and disadvantages, implications, justify, argue, recommend
+
+        Required output (no extra keys):
         {{
           "category": "administrative" | "informational" | "analytical",
-          "confidence": <float 0.0-1.0>,
+          "confidence": <0.0-1.0>,
           "requires_tool": <true | false>
         }}
 
-        requires_tool is true only when the query explicitly needs the
-        summarize_document, generate_quiz, generate_flashcards, or create_schedule tool.
+        requires_tool is true only when the student explicitly asks to generate a quiz,
+        generate flashcards, summarise a document, or create a schedule.
 
         Student query: "{msg}"
     """
     system_prompt = (
-        "You are a strict classifier. Respond ONLY with a valid JSON object. "
+        "You are a strict JSON classifier. Respond ONLY with a valid JSON object. "
         "No explanation, no markdown, no extra text."
     )
 
@@ -199,11 +151,68 @@ async def triage_node(state: AgentState) -> dict:
         confidence = max(0.0, min(1.0, confidence))
         requires_tool = bool(parsed.get("requires_tool", False))
     except (json.JSONDecodeError, ValueError, TypeError):
-        # Safe fallback: treat as informational with sub-threshold confidence
-        # to ensure uncertain queries escalate rather than stay local.
+        # treat as informational with sub-threshold confidence
         category = "informational"
         confidence = 0.5
         requires_tool = False
+
+    msg_lower = msg.lower()
+
+    # analytical signals override: if any analytical signal is present, 
+    # boost to "analytical" with high confidence even if the LLM misclassified it as "informational" 
+    # or returned low confidence
+    _ANALYTICAL_VERBS = (
+        "critically", "evaluate", "assess", "compare", "contrast",
+        "justify", "argue",
+    )
+    _ANALYTICAL_NOUNS = ("trade-off", "trade-offs", "pros and cons", "implications",
+                         "advantages and disadvantages")
+    _COMPARISON_MARKERS = (" versus ", " vs ")
+    _has_verb = any(v in msg_lower for v in _ANALYTICAL_VERBS)
+    _has_noun = any(n in msg_lower for n in _ANALYTICAL_NOUNS)
+    _has_cmp  = any(c in msg_lower for c in _COMPARISON_MARKERS)
+    if category != "analytical" and (_has_verb or (_has_noun and _has_cmp)):
+        category   = "analytical"
+        confidence = 0.95
+
+    # analytical signals override: if the LLM misclassified the query as "informational"
+    if category == "analytical" and not _has_verb and not _has_cmp:
+        category   = "informational"
+        confidence = 0.50  # guaranteed below any threshold → cloud_standard via Override 4
+
+    # confidence boost for factual queries
+    _FACTUAL_PREFIXES = (
+        "what is", "what are", "what does", "what do", "what was",
+        "how does", "how do", "how is", "how are",
+        "why is",  "why are",  "why does",
+        "define ", "explain ", "describe ",
+    )
+    if (category == "informational"
+            and confidence < CONFIDENCE_THRESHOLD_INFORMATIONAL
+            and len(msg.split()) <= 14
+            and any(msg_lower.startswith(p) for p in _FACTUAL_PREFIXES)
+            and not _has_verb and not _has_noun and not _has_cmp):
+        confidence = 0.90
+
+    # confidence reduction for long, complex queries without analytical signals that may have been misclassified as informational
+    if (category == "informational"
+            and len(msg.split()) >= 15
+            and not _has_verb and not _has_noun and not _has_cmp):
+        confidence = min(confidence, 0.82)
+
+    # intent override for explicit tool requests
+    _ADMIN_SIGNALS = (
+        "remind", "reminder",
+        "assignment due", "report due", "project due",
+        "due this", "due next", "due on", "due by", "is due",
+        "deadline",
+        "study plan", "revision plan", "study schedule",
+        "prioritise my", "prioritize my",
+        "exam next", "exam on",
+    )
+    if any(s in msg_lower for s in _ADMIN_SIGNALS):
+        category   = "administrative"
+        confidence = max(confidence, 0.80)
 
     print(
         f"[LANGGRAPH]: category={category}, confidence={confidence:.2f}, "
@@ -214,28 +223,13 @@ async def triage_node(state: AgentState) -> dict:
         "confidence":      confidence,
         "requires_tool":   requires_tool,
         "reasoning_steps": ["triaged"],
+        "timings":         {**state.get("timings", {}), "triage_ms": round((time.perf_counter() - _t0) * 1000)},
     }
 
-
-# ---------------------------------------------------------------------------
-# Node 2 – Local generation (llama3.2:3b)
-#
-# Handles Administrative tasks (confidence ≥ 0.70) and Informational tasks
-# (confidence ≥ 0.85, no tool required).  Zero marginal cost; does not
-# touch any budget pool.  Latency target < 200 ms first token (thesis §3.4.1).
-# ---------------------------------------------------------------------------
 async def local_generation_node(state: AgentState) -> dict:
-    """
-    llama3.2:3b synthesises the final response for low-complexity queries.
-    Session history (last ≤6 turns) is included for multi-turn context.
 
-    No budget pool is charged; log_route_event records cost = 0.0.
-
-    Two sub-modes:
-      - document_context set → grounded answer using only provided file excerpts
-      - otherwise → personalised answer with injected session context block
-    """
     print("[LANGGRAPH]: Local Generation Path (llama3.2:3b)...")
+    _t0 = time.perf_counter()
 
     msg = _get_message(state)
     document_context = state.get("document_context")
@@ -243,22 +237,22 @@ async def local_generation_node(state: AgentState) -> dict:
     # ── Document source mode: grounded prompt, no context injection ───────
     if document_context:
         synthesis_prompt = f"""You are helping a student understand their study material.
-Answer the student's question by reasoning from the document excerpts provided below.
-Base your answer on the content in the excerpts. You may paraphrase, explain, or summarise — do not invent facts not supported by the text.
-If the topic genuinely does not appear anywhere in the excerpts, say so briefly and describe what the excerpts do cover.
+            Answer the student's question by reasoning from the document excerpts provided below.
+            Base your answer on the content in the excerpts. You may paraphrase, explain, or summarise — do not invent facts not supported by the text.
+            If the topic genuinely does not appear anywhere in the excerpts, say so briefly and describe what the excerpts do cover.
 
-Document excerpts:
-{document_context}
+            Document excerpts:
+            {document_context}
 
-Student question: {msg}
-"""
+            Student question: {msg}
+        """
         system_prompt = (
             "You are a helpful study assistant. Answer from the provided document excerpts. "
             "Reason from the content — paraphrasing and summarising are fine. "
             "Do not fabricate facts not present in the excerpts."
         )
     else:
-        # ── Standard mode: inject personalised session context ────────────
+        # personalised synthesis prompt
         history_block = _build_history_block(state)
 
         try:
@@ -291,11 +285,11 @@ Student question: {msg}
             _context_block = ""
 
         synthesis_prompt = f"""You are a helpful and friendly academic assistant.
-Answer the student's request directly and naturally.
-Do not provide hypothetical examples, meta-commentary, or templates.
-{_context_block}{history_block}
-Student request: {msg}
-"""
+            Answer the student's request directly and naturally.
+            Do not provide hypothetical examples, meta-commentary, or templates.
+            {_context_block}{history_block}
+            Student request: {msg}
+        """
         system_prompt = (
             "You are a strict assistant. Reply with a single direct response only. "
             "Do not include examples, hypothetical wording, or descriptions of "
@@ -314,7 +308,7 @@ Student request: {msg}
         model_name="llama3.2:3b",
         category=state.get("category", ""),
         confidence=state.get("confidence", 0.0),
-        input_tokens=0,    # Ollama does not return token counts reliably
+        input_tokens=0, 
         output_tokens=0,
         pool=None,
     )
@@ -325,27 +319,12 @@ Student request: {msg}
         "routing_decision": "llama3.2:3b",
         "budget_pool_used": None,
         "reasoning_steps":  reasoning_steps + ["local_generation_executed"],
+        "timings":          {**state.get("timings", {}), "generation_ms": round((time.perf_counter() - _t0) * 1000)},
     }
 
-
-# ---------------------------------------------------------------------------
-# Node 3 – Cloud standard escalation (GPT-4o mini)
-#
-# Handles Informational tasks below the 0.85 confidence threshold, or
-# Administrative tasks below 0.70.  Tool-calling accuracy 95–97% (§3.2.4).
-# Charges the visible pool first, then the quiz-bonus pool.
-# ---------------------------------------------------------------------------
 async def cloud_standard_node(state: AgentState) -> dict:
-    """
-    GPT-4o mini path: low-confidence queries where llama3.2:3b self-reported
-    uncertainty below the category-specific threshold (thesis §3.4.2).
-
-    Budget check order:
-      1. Visible pool  → if sufficient, charge and proceed.
-      2. Bonus pool    → if sufficient, charge and proceed.
-      3. Neither       → return a budget-exhausted message (no LLM call).
-    """
     print("[LANGGRAPH]: Cloud Standard Path (GPT-4o mini)...")
+    _t0 = time.perf_counter()
 
     msg = _get_message(state)
     history_block = _build_history_block(state)
@@ -371,6 +350,7 @@ async def cloud_standard_node(state: AgentState) -> dict:
             "routing_decision": "blocked:budget_exhausted",
             "budget_pool_used": None,
             "reasoning_steps":  reasoning_steps + ["cloud_standard_blocked:no_budget"],
+            "timings":          {**state.get("timings", {}), "generation_ms": round((time.perf_counter() - _t0) * 1000)},
         }
 
     res = await cloud_response(
@@ -408,25 +388,12 @@ async def cloud_standard_node(state: AgentState) -> dict:
         "routing_decision": "GPT-4o mini",
         "budget_pool_used": pool_used.value,
         "reasoning_steps":  reasoning_steps + ["cloud_standard_executed"],
+        "timings":          {**state.get("timings", {}), "generation_ms": round((time.perf_counter() - _t0) * 1000)},
     }
 
-
-# ---------------------------------------------------------------------------
-# Node 4 – Cloud complex escalation (GPT-4o)
-#
-# Reserved for all Analytical tasks (unconditional escalation – thesis §3.4.2).
-# Tool-calling accuracy 97–99% (§3.2.4).  Charges visible/bonus pool.
-# ---------------------------------------------------------------------------
 async def cloud_complex_node(state: AgentState) -> dict:
-    """
-    GPT-4o path: analytical queries requiring multi-step reasoning where
-    output quality and tool-argument accuracy outweigh the higher per-token cost.
-
-    Analytical tasks escalate unconditionally regardless of confidence score
-    (thesis §3.4.2: "Analytical tasks and all tool-bearing requests escalate
-    unconditionally").
-    """
     print("[LANGGRAPH]: Cloud Complex Path (GPT-4o)...")
+    _t0 = time.perf_counter()
 
     msg = _get_message(state)
     history_block = _build_history_block(state)
@@ -442,7 +409,7 @@ async def cloud_complex_node(state: AgentState) -> dict:
         "Provide thorough, well-structured, and accurate responses."
     )
 
-    # ── Pre-call: check which pool is available (no deduction yet) ────────
+    # pre-call pool check
     try:
         pool_used = await check_pool_available(session_id=state["session_id"])
     except BudgetExhaustedError:
@@ -452,6 +419,7 @@ async def cloud_complex_node(state: AgentState) -> dict:
             "routing_decision": "blocked:budget_exhausted",
             "budget_pool_used": None,
             "reasoning_steps":  reasoning_steps + ["cloud_complex_blocked:no_budget"],
+            "timings":          {**state.get("timings", {}), "generation_ms": round((time.perf_counter() - _t0) * 1000)},
         }
 
     res = await cloud_response(
@@ -488,33 +456,10 @@ async def cloud_complex_node(state: AgentState) -> dict:
         "routing_decision": "GPT-4o",
         "budget_pool_used": pool_used.value,
         "reasoning_steps":  reasoning_steps + ["cloud_complex_executed"],
+        "timings":          {**state.get("timings", {}), "generation_ms": round((time.perf_counter() - _t0) * 1000)},
     }
 
-
-# ---------------------------------------------------------------------------
-# Node 5 – Tool executor (cloud-only path)
-#
-# Only reached when requires_tool=True.  llama3.2:3b is excluded from tool
-# invocation because it does not support reliable function calling at 3B
-# parameters (thesis §3.2.3, §3.5.1).
-#
-# Budget routing by tool type (thesis §3.4.3, §3.5.3):
-#   generate_quiz        → shadow reserve (hidden pool, always available)
-#   summarize_document   → visible/bonus pool
-#   create_schedule      → visible/bonus pool
-#
-# Registered MCP tools: summarize_document, generate_quiz, create_schedule.
-# ---------------------------------------------------------------------------
 async def tool_executor_node(state: AgentState) -> dict:
-    """
-    Determines which FastMCP tools are needed, applies the correct budget pool
-    per tool type, executes them, then synthesises the final response using
-    GPT-4o mini with tool results as grounded context.
-
-    Quiz generation is gated by the shadow reserve so it remains available
-    even when the student's visible balance is zero.  All other tool calls
-    are gated by the visible/bonus pool cascade.
-    """
     print("[LANGGRAPH]: Tool Executor (cloud path) – selecting tools...")
 
     msg = _get_message(state)
@@ -526,7 +471,6 @@ async def tool_executor_node(state: AgentState) -> dict:
     tool_calls: list = []
     tool_results: dict = {}
 
-    # ── Tool selection ────────────────────────────────────────────────────
     # If the frontend specified a tool directly, skip the LLM selection step.
     forced = state.get("forced_tool_name")
     if forced:
@@ -551,8 +495,9 @@ async def tool_executor_node(state: AgentState) -> dict:
 
     print(f"[LANGGRAPH]: Tools selected: {tool_calls}")
 
-    # ── Execute each selected tool with appropriate pool check ────────────
     pool_used_for_synthesis: Optional[Pool] = None
+    tool_timings: dict = {}
+    _t0 = time.perf_counter()
 
     for tool_name in tool_calls:
         tool = get_tool(tool_name)
@@ -589,6 +534,7 @@ async def tool_executor_node(state: AgentState) -> dict:
                 print(f"[LANGGRAPH]: Budget exhausted for tool '{tool_name}'")
                 continue
 
+        _tool_t0 = time.perf_counter()
         try:
             result = await tool.execute(
                 session_id=state["session_id"],
@@ -600,11 +546,11 @@ async def tool_executor_node(state: AgentState) -> dict:
         except Exception as exc:
             tool_results[tool_name] = f"Error: {exc}"
             print(f"[LANGGRAPH]: Tool '{tool_name}' failed: {exc}")
+        tool_timings[tool_name] = round((time.perf_counter() - _tool_t0) * 1000)
 
-    # ── Quiz / flashcard early-return: skip synthesis, send raw JSON ─────────
-    # React components render interactive UI directly from the structured data.
     # Always bypass synthesis for these tools — even for errors/budget exhausted.
     reasoning_steps = list(state.get("reasoning_steps") or [])
+    _base_timings = {**state.get("timings", {}), "generation_ms": round((time.perf_counter() - _t0) * 1000), "tools": tool_timings}
 
     if tool_calls == ["generate_quiz"]:
         quiz_str = tool_results.get("generate_quiz", "")
@@ -616,6 +562,7 @@ async def tool_executor_node(state: AgentState) -> dict:
                 "routing_decision": "GPT-4o mini (tool path)",
                 "budget_pool_used": "shadow",
                 "reasoning_steps":  reasoning_steps + ["quiz_generated:direct_return"],
+                "timings":          _base_timings,
             }
 
     if tool_calls == ["generate_flashcards"]:
@@ -628,6 +575,7 @@ async def tool_executor_node(state: AgentState) -> dict:
                 "routing_decision": "llama3.2:3b (tool path)",
                 "budget_pool_used": None,
                 "reasoning_steps":  reasoning_steps + ["flashcards_generated:direct_return"],
+                "timings":          _base_timings,
             }
 
     # ── Synthesis – GPT-4o mini with tool results as grounded context ─────
@@ -665,6 +613,7 @@ async def tool_executor_node(state: AgentState) -> dict:
                 "routing_decision": "GPT-4o mini (tool path – synthesis blocked)",
                 "budget_pool_used": None,
                 "reasoning_steps":  reasoning_steps + [f"tools_executed:{tool_calls}", "synthesis_blocked:no_budget"],
+                "timings":          {**_base_timings, "generation_ms": round((time.perf_counter() - _t0) * 1000)},
             }
 
     res = await cloud_response(
@@ -703,42 +652,26 @@ async def tool_executor_node(state: AgentState) -> dict:
         "routing_decision": "GPT-4o mini (tool path)",
         "budget_pool_used": pool_used_for_synthesis.value if pool_used_for_synthesis else None,
         "reasoning_steps":  reasoning_steps + [f"tools_executed: {tool_calls}"],
+        "timings":          {**_base_timings, "generation_ms": round((time.perf_counter() - _t0) * 1000)},
     }
 
-
-# ---------------------------------------------------------------------------
-# Conditional routing edge (thesis §3.4.2 – Confidence Threshold Policy)
-#
-# Priority order:
-#   1. analytical        → cloud_complex  (unconditional, always needs deep reasoning)
-#   2. requires_tool     → tool_executor  (cloud; quiz gen uses shadow pool inside node)
-#   3. administrative, confidence ≥ 0.70 → local_generation
-#   4. informational,   confidence ≥ 0.85 → local_generation
-#   5. otherwise         → cloud_standard (confidence below category threshold)
-#
-# The asymmetric thresholds encode the asymmetric factual-error risk of each
-# category (thesis §3.4.2): administrative errors are cosmetic and recoverable;
-# informational errors may be accepted as fact by a student with no reference.
-# ---------------------------------------------------------------------------
 def route_decision(state: AgentState) -> str:
     category   = state.get("category", "informational")
     confidence = state.get("confidence", 0.5)
 
-    # ── Tool-required: always goes to the cloud tool executor ─────────────
-    # Must come before document_context so "Generate Quiz" with sources active
-    # still reaches the tool executor instead of local_generation.
+    # Tool-required always goes to the cloud tool executor
     if state.get("requires_tool"):
         return "tool_executor"
 
-    # ── Document source mode: always local, grounded answer ───────────────
+    # Document source mode always local
     if state.get("document_context"):
         return "local_generation"
 
-    # ── Analytical: unconditional cloud escalation ────────────────────────
+    # Analytical unconditional cloud escalation
     if category == "analytical":
         return "cloud_complex"
 
-    # ── Administrative: threshold 0.70 ────────────────────────────────────
+    # Administrative threshold 0.70
     if category == "administrative":
         return (
             "local_generation"
@@ -746,18 +679,13 @@ def route_decision(state: AgentState) -> str:
             else "cloud_standard"
         )
 
-    # ── Informational (default): threshold 0.85 ───────────────────────────
+    # Informational threshold 0.85
     return (
         "local_generation"
         if confidence >= CONFIDENCE_THRESHOLD_INFORMATIONAL
         else "cloud_standard"
     )
 
-
-# ---------------------------------------------------------------------------
-# Graph construction (thesis §3.2.5 – LangGraph orchestration)
-# Five nodes, one conditional edge from triage, four terminal edges.
-# ---------------------------------------------------------------------------
 workflow = StateGraph(AgentState)
 
 workflow.add_node("triage",           triage_node)
@@ -784,15 +712,8 @@ workflow.add_edge("cloud_standard",   END)
 workflow.add_edge("cloud_complex",    END)
 workflow.add_edge("tool_executor",    END)
 
-# Compiled once at application startup inside the FastAPI lifespan context
-# manager; FastAPI awaits the Runnable directly inside the request handler
-# without a thread-pool wrapper (thesis §3.2.5).
 app_instance = workflow.compile()
 
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
 async def routing_logic(
     text: str,
     session_id: int,
@@ -800,24 +721,6 @@ async def routing_logic(
     document_context: str | None = None,
     source_file_ids: list[int] | None = None,
 ) -> dict:
-    """
-    Route a student message through the cost-adaptive hybrid pipeline.
-
-    Parameters
-    ----------
-    text            : raw student input
-    session_id      : active session PK (required for budget pool checks)
-    session_history : list of {"role": "user"|"assistant", "content": str}
-                      representing recent turns (trimmed to ≤6 internally).
-
-    Returns
-    -------
-    dict with keys:
-        response         : str   – the assistant's answer
-        routing_decision : str   – which model/path handled the request
-        budget_pool_used : str | None – "visible" | "bonus" | "shadow" | None
-        reasoning_steps  : list  – breadcrumb trail for evaluation (thesis §4)
-    """
     initial_state: AgentState = {
         "message":          text,
         "user_input":       text,           # legacy alias kept for direct ainvoke() callers

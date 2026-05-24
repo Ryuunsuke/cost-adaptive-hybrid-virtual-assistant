@@ -30,9 +30,27 @@
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 10px;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+}
+
+.timing-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.timing-total {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #999;
+}
+
+.timing-tools {
+  font-size: 0.65rem;
+  color: #bbb;
 }
 
 .badge-local   { background: #d1f2eb; color: #0e6655; }

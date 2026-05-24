@@ -1,5 +1,5 @@
-import QuizDisplay from './QuizDisplay';
-import FlashcardDisplay from './FlashcardDisplay';
+import QuizDisplay from '../widgets/QuizDisplay';
+import FlashcardDisplay from '../widgets/FlashcardDisplay';
 import './Message.css';
 
 // ── Inline formatter: **bold**, *italic*, `code` ──────────────────────────
@@ -203,8 +203,23 @@ function ScheduleInline({ entries }) {
   );
 }
 
+function TimingLabel({ total_ms, timings }) {
+  if (!total_ms) return null;
+  const secs = (total_ms / 1000).toFixed(1);
+  const tools = timings?.tools;
+  const toolBreakdown = tools && Object.keys(tools).length > 0
+    ? Object.entries(tools).map(([name, ms]) => `${name}: ${(ms / 1000).toFixed(1)}s`).join(' · ')
+    : null;
+  return (
+    <div className="timing-row">
+      <span className="timing-total">&#9201; {secs}s</span>
+      {toolBreakdown && <span className="timing-tools">{toolBreakdown}</span>}
+    </div>
+  );
+}
+
 function Message({ message, sessionId }) {
-  const { text, sender, model } = message;
+  const { text, sender, model, total_ms, timings } = message;
   const badge = sender === 'assistant' && model ? BADGE_MAP[model] : null;
   const quizInfo = sender === 'assistant' ? tryParseQuiz(text) : null;
   const flashcards = !quizInfo && sender === 'assistant' ? tryParseFlashcards(text) : null;
@@ -216,6 +231,7 @@ function Message({ message, sessionId }) {
         {badge && (
           <span className={`model-badge ${badge.cls}`}>{badge.label}</span>
         )}
+        {sender === 'assistant' && <TimingLabel total_ms={total_ms} timings={timings} />}
         {quizInfo?.type === 'quiz'
           ? <QuizDisplay quiz={quizInfo.data} sessionId={sessionId} />
           : quizInfo?.type === 'completed'

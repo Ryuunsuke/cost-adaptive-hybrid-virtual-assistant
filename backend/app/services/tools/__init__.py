@@ -98,7 +98,7 @@ class ToolProxy:
     ) -> str:
         args = await self._extract_args(user_input)
         args["session_id"] = session_id
-        if source_file_ids and self.name in ("generate_quiz", "generate_flashcards"):
+        if source_file_ids and self.name in ("generate_quiz", "generate_flashcards", "summarize_document"):
             args["file_ids"] = source_file_ids
         return await self._call_tool(**args)
 

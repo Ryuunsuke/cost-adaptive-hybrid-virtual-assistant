@@ -2,8 +2,8 @@ import { useState, useRef, useEffect } from 'react';
 import Message from './Message';
 import ChatInput from './ChatInput';
 import FileUpload from './FileUpload';
-import Stats from './Stats';
-import SchedulePanel from './SchedulePanel';
+import Stats from '../widgets/Stats';
+import SchedulePanel from '../schedule/SchedulePanel';
 import './Chat.css';
 
 function Chat({ sessionId, username, onBack }) {
@@ -51,7 +51,7 @@ function Chat({ sessionId, username, onBack }) {
           session_id: sessionId,
           message: text,
           force_tool: options.forceTool ?? '',
-          source_file_ids: sourceFileIds,
+          source_file_ids: options.sourceFileIds ?? sourceFileIds,
         }),
       });
 
@@ -63,6 +63,8 @@ function Chat({ sessionId, username, onBack }) {
         text: data.reply,
         sender: 'assistant',
         model: data.routing_decision,
+        total_ms: data.total_ms,
+        timings: data.timings,
       };
       setMessages(prev => [...prev, assistantMessage]);
     } catch (error) {

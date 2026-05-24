@@ -159,6 +159,29 @@
   color: #333;
 }
 
+.multi-source-bar {
+  background: #fff8e1;
+  border: 1px solid #ffe082;
+  border-radius: 10px;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.multi-source-label {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #f57f17;
+}
+
+.multi-source-actions {
+  display: flex;
+  gap: 10px;
+}
+
 .upload-placeholder {
   flex: 1;
   display: flex;
