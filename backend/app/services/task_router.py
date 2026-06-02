@@ -25,6 +25,9 @@ CONFIDENCE_THRESHOLD_INFORMATIONAL:  float = 0.85
 # Tool name that draws from the shadow reserve
 SHADOW_RESERVE_TOOL: str = "generate_quiz"
 
+# Tools that run entirely on the local model — no pool check or deduction
+_FREE_TOOLS: frozenset = frozenset({"generate_flashcards"})
+
 # Sentinel returned to the frontend when a budget pool is exhausted
 _BUDGET_EXHAUSTED_MSG = (
     "Your session budget has been reached for this type of request. "
@@ -505,8 +508,12 @@ async def tool_executor_node(state: AgentState) -> dict:
             print(f"[LANGGRAPH]: Tool '{tool_name}' not found – skipping")
             continue
 
-        # Route generate_quiz through shadow reserve; all others through visible/bonus
+        # Route based on cost model:
+        #   generate_quiz       → shadow reserve (cloud GPT-4o-mini call inside)
+        #   generate_flashcards → free (local model only, no pool check)
+        #   everything else     → visible/bonus pool
         is_quiz_tool = (tool_name == SHADOW_RESERVE_TOOL)
+        is_free_tool = (tool_name in _FREE_TOOLS)
 
         if is_quiz_tool:
             try:
@@ -522,6 +529,8 @@ async def tool_executor_node(state: AgentState) -> dict:
                 )
                 print(f"[LANGGRAPH]: Shadow reserve exhausted for '{tool_name}'")
                 continue
+        elif is_free_tool:
+            print(f"[LANGGRAPH]: '{tool_name}' uses local model — skipping pool check")
         else:
             try:
                 pool_used_for_synthesis = await check_pool_available(

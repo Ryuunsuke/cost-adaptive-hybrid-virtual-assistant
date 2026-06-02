@@ -7,12 +7,25 @@ from services.LLMs import local_response
 
 _CARD_COUNT = 10
 
+# First words that indicate the model generated a question instead of a concept name
+_BAD_TERM_STARTERS = frozenset({
+    "why", "what", "how", "when", "where", "who", "which",
+    "explain", "describe", "define", "list", "name",
+})
+
 def _validate_cards(cards: list[dict]) -> None:
     for i, card in enumerate(cards):
-        if not card.get("term") or not isinstance(card["term"], str):
+        term = card.get("term", "")
+        defn = card.get("definition", "")
+        if not term or not isinstance(term, str):
             raise ValueError(f"Card {i} missing or invalid 'term'")
-        if not card.get("definition") or not isinstance(card["definition"], str):
+        if not defn or not isinstance(defn, str):
             raise ValueError(f"Card {i} missing or invalid 'definition'")
+        first_word = term.strip().split()[0].lower().rstrip("?")
+        if first_word in _BAD_TERM_STARTERS:
+            raise ValueError(
+                f"Card {i} term '{term}' is a question word, not a concept name"
+            )
 
 async def generate_flashcards(
     session_id: int,
@@ -68,21 +81,30 @@ async def generate_flashcards(
     else:
         source_block = f"Topic: {topic}"
 
-    prompt = f"""Create exactly {_CARD_COUNT} flashcard pairs based on the content below.
-        Each card should capture one key concept, term, or fact.
+    prompt = f"""Create exactly {_CARD_COUNT} flashcard pairs from the content below.
+
+        Rules:
+        - "term" must be the NAME of a concept, technique, or principle — a noun phrase of 1 to 6 words.
+          Never use question words (Why, What, How, Explain, Describe, etc.) as the term.
+        - "definition" must explain that specific term in 1 to 2 sentences.
+        - Every definition must directly correspond to its term.
+
+        Example of correct output:
+        [{{"term": "Binary Search", "definition": "A divide-and-conquer algorithm that locates a target by repeatedly halving a sorted list. Time complexity is O(log n)."}}]
 
         Return ONLY a valid JSON array — no markdown, no explanation, no preamble.
         Each element must follow this exact schema:
         {{
-        "term":       "<the term, concept, or question>",
-        "definition": "<the definition, explanation, or answer>"
+        "term":       "<noun phrase naming the concept — 1 to 6 words>",
+        "definition": "<concise explanation of that specific concept>"
         }}
 
         {source_block}"""
 
     system_prompt = (
         f"You are a flashcard generator. Respond ONLY with a valid JSON array of exactly "
-        f"{_CARD_COUNT} elements. No markdown fences, no explanation, no text before or after the array."
+        f"{_CARD_COUNT} elements. No markdown fences, no explanation, no text before or after the array. "
+        f"Each term must be a concept name (noun phrase), never a question word."
     )
 
     raw = await local_response(prompt, system_prompt=system_prompt)
@@ -91,6 +113,9 @@ async def generate_flashcards(
     for attempt in range(2):
         try:
             clean = (raw or "").strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+            # llama3.2:3b often truncates the closing ] — recover before parsing
+            if clean.startswith("[") and not clean.rstrip().endswith("]"):
+                clean = clean.rstrip().rstrip(",") + "\n]"
             cards = json.loads(clean)
             if not isinstance(cards, list) or not cards:
                 raise ValueError("Expected a non-empty JSON array")

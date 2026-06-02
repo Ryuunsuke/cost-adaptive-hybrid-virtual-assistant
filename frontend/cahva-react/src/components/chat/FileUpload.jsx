@@ -15,7 +15,20 @@ function FileUpload({ sessionId, onAction, onSourceChange }) {
   useEffect(() => {
     fetch(`http://localhost:8000/api/files?session_id=${sessionId}`)
       .then(r => r.json())
-      .then(d => { if (d.files) setFiles(d.files); })
+      .then(d => {
+        if (!d.files) return;
+        setFiles(d.files);
+        // Remove any source IDs that no longer exist in the file list
+        const validIds = new Set(d.files.map(f => f.id_file));
+        setActiveSourceIds(prev => {
+          const filtered = prev.filter(id => validIds.has(id));
+          if (filtered.length !== prev.length) {
+            localStorage.setItem(`doc_source_${sessionId}`, JSON.stringify(filtered));
+            onSourceChange?.(filtered);
+          }
+          return filtered;
+        });
+      })
       .catch(() => {});
   }, [sessionId]);
 
@@ -118,7 +131,7 @@ function FileUpload({ sessionId, onAction, onSourceChange }) {
             const singleSource = activeSourceIds.length === 1;
             return (
               <section key={f.id_file ?? idx} className="file-card">
-                {idx === 0 && <span className="file-active-badge">Active</span>}
+                {isSource && <span className="file-active-badge">Active</span>}
                 <div className="file-name">&#128196; {f.filename}</div>
                 <div className="file-meta">{f.char_count.toLocaleString()} characters extracted</div>
                 <div className="file-actions">
