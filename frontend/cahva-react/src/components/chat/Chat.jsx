@@ -113,7 +113,12 @@ function Chat({ sessionId, username, onBack }) {
         <>
           <div className="messages-container">
             {messages.map(message => (
-              <Message key={message.id} message={message} sessionId={sessionId} />
+              <Message
+                key={message.id}
+                message={message}
+                sessionId={sessionId}
+                onNewQuiz={() => handleSendMessage('Generate a new quiz', { forceTool: 'generate_quiz' })}
+              />
             ))}
             {isLoading && <div className="message assistant">Thinking...</div>}
             <div ref={messagesEndRef} />

@@ -218,7 +218,7 @@ function TimingLabel({ total_ms, timings }) {
   );
 }
 
-function Message({ message, sessionId }) {
+function Message({ message, sessionId, onNewQuiz }) {
   const { text, sender, model, total_ms, timings } = message;
   const badge = sender === 'assistant' && model ? BADGE_MAP[model] : null;
   const quizInfo = sender === 'assistant' ? tryParseQuiz(text) : null;
@@ -233,9 +233,9 @@ function Message({ message, sessionId }) {
         )}
         {sender === 'assistant' && <TimingLabel total_ms={total_ms} timings={timings} />}
         {quizInfo?.type === 'quiz'
-          ? <QuizDisplay quiz={quizInfo.data} sessionId={sessionId} />
+          ? <QuizDisplay quiz={quizInfo.data} sessionId={sessionId} onNewQuiz={onNewQuiz} />
           : quizInfo?.type === 'completed'
-          ? <QuizDisplay completed={quizInfo.data} />
+          ? <QuizDisplay completed={quizInfo.data} sessionId={sessionId} onNewQuiz={onNewQuiz} />
           : flashcards
           ? <FlashcardDisplay cards={flashcards} />
           : scheduleEntries
