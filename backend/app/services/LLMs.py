@@ -8,7 +8,7 @@ from ollama import AsyncClient          # local tier
 from openai import AsyncOpenAI          # cloud tier
 
 
-OLLAMA_PRIMARY_URL  = os.environ.get("OLLAMA_URL",      "http://100.103.84.44:11434")
+OLLAMA_PRIMARY_URL  = os.environ.get("OLLAMA_URL",      "http://localhost:11434")
 
 _ollama_client: AsyncClient = AsyncClient(host=OLLAMA_PRIMARY_URL)
 _openai_client: AsyncOpenAI = AsyncOpenAI()

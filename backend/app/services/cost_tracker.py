@@ -387,4 +387,19 @@ async def run_daily_reset(session_id: int) -> bool:
                 """,
                 session_id,
             )
+
+            # Mirror the reset into user_budget so future sessions start fresh
+            await conn.execute(
+                """
+                    UPDATE user_budget
+                    SET    visible_used   = 0,
+                           shadow_used    = 0,
+                           depleted_at    = NULL,
+                           next_reset_at  = DATE_TRUNC('day', NOW() AT TIME ZONE 'UTC')
+                                            + INTERVAL '1 day',
+                           updated_at     = NOW()
+                    WHERE  user_id = (SELECT user_id FROM session WHERE id_session = $1)
+                """,
+                session_id,
+            )
     return True

@@ -86,6 +86,7 @@ function App() {
   return (
     <div className="app">
       <Chat
+        key={sessionId}
         sessionId={sessionId}
         username={user.username}
         onBack={handleBackToSessions}

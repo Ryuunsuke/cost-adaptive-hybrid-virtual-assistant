@@ -11,7 +11,7 @@ function ProgressBar({ remaining, total }) {
   );
 }
 
-function Stats({ sessionId }) {
+function Stats({ sessionId, username }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showBonus, setShowBonus] = useState(false);
@@ -25,7 +25,7 @@ function Stats({ sessionId }) {
         setLoading(false);
 
         const bonus = d.budget?.quiz_bonus || 0;
-        const seenKey = `bonus_seen_${sessionId}`;
+        const seenKey = `bonus_seen_u_${username}`;
         const seenBonus = parseFloat(localStorage.getItem(seenKey) || '0');
 
         if (bonus > seenBonus) {
@@ -63,10 +63,10 @@ function Stats({ sessionId }) {
           <div className="stat-label">
             <span>Available Tokens</span>
             <span className="stat-value">
-              {(Math.max(0, budget.visible_limit - budget.visible_used) + budget.quiz_bonus).toFixed(0)}
+              {Math.max(0, budget.visible_limit - budget.visible_used).toFixed(0)}
               {' / '}
               {budget.visible_limit.toFixed(0)}
-              {showBonus && (
+              {showBonus && budget.quiz_bonus > 0 && (
                 <span style={{ color: '#2e7d32', fontSize: '0.82em' }}> (+{budget.quiz_bonus.toFixed(0)} bonus)</span>
               )}
             </span>

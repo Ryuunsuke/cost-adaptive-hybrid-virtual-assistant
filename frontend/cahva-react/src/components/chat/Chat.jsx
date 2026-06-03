@@ -4,6 +4,7 @@ import ChatInput from './ChatInput';
 import FileUpload from './FileUpload';
 import Stats from '../widgets/Stats';
 import SchedulePanel from '../schedule/SchedulePanel';
+import chatRequests from '../../chatRequests';
 import './Chat.css';
 
 function Chat({ sessionId, username, onBack }) {
@@ -38,35 +39,71 @@ function Chat({ sessionId, username, onBack }) {
       .catch(() => {});
   }, [sessionId]);
 
+  // On mount: if a request is still in-flight for this session (user switched away
+  // and came back), re-attach to the promise so loading state and response are
+  // shown correctly.
+  useEffect(() => {
+    const pending = chatRequests.get(sessionId);
+    if (!pending) return;
+
+    setIsLoading(true);
+
+    pending
+      .then(() => {
+        // Re-fetch history — the backend task has now saved the assistant reply.
+        return fetch(`http://localhost:8000/api/history?session_id=${sessionId}`)
+          .then(r => r.json())
+          .then(d => setMessages(d.messages.map(m => ({
+            id: m.id_message,
+            text: m.content,
+            sender: m.role,
+          }))));
+      })
+      .catch(() => {
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          text: "Sorry, I'm having trouble connecting to the server.",
+          sender: 'assistant',
+        }]);
+      })
+      .finally(() => {
+        chatRequests.clear(sessionId);
+        setIsLoading(false);
+      });
+  }, [sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleSendMessage = async (text, options = {}) => {
     const userMessage = { id: Date.now(), text, sender: 'user' };
     setMessages(prev => [...prev, userMessage]);
     setIsLoading(true);
 
+    // Build and store the promise at module level so it survives component unmount.
+    const fetchPromise = fetch("http://localhost:8000/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionId,
+        message: text,
+        force_tool: options.forceTool ?? '',
+        source_file_ids: options.sourceFileIds ?? sourceFileIds,
+      }),
+    }).then(r => {
+      if (!r.ok) throw new Error("Network response was not ok");
+      return r.json();
+    });
+
+    chatRequests.set(sessionId, fetchPromise);
+
     try {
-      const response = await fetch("http://localhost:8000/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          message: text,
-          force_tool: options.forceTool ?? '',
-          source_file_ids: options.sourceFileIds ?? sourceFileIds,
-        }),
-      });
-
-      if (!response.ok) throw new Error("Network response was not ok");
-
-      const data = await response.json();
-      const assistantMessage = {
+      const data = await fetchPromise;
+      setMessages(prev => [...prev, {
         id: Date.now() + 1,
         text: data.reply,
         sender: 'assistant',
         model: data.routing_decision,
         total_ms: data.total_ms,
         timings: data.timings,
-      };
-      setMessages(prev => [...prev, assistantMessage]);
+      }]);
     } catch (error) {
       setMessages(prev => [...prev, {
         id: Date.now() + 1,
@@ -75,6 +112,7 @@ function Chat({ sessionId, username, onBack }) {
       }]);
       console.error("Error:", error);
     } finally {
+      chatRequests.clear(sessionId);
       setIsLoading(false);
     }
   };
@@ -137,7 +175,7 @@ function Chat({ sessionId, username, onBack }) {
         />
       )}
       {activeTab === 'schedule' && <SchedulePanel sessionId={sessionId} />}
-      {activeTab === 'stats' && <Stats sessionId={sessionId} />}
+      {activeTab === 'stats' && <Stats sessionId={sessionId} username={username} />}
     </div>
   );
 }

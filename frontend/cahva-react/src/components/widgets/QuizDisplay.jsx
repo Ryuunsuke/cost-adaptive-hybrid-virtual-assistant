@@ -50,11 +50,13 @@ function QuizDisplay({ quiz, completed, sessionId, onNewQuiz }) {
 
   const shuffle = (arr) => [...arr].sort(() => Math.random() - 0.5);
 
-  // Score data to show in the done line — from completed prop or last submit
-  const doneScore = completed
-    ? { score: completed.score, total: completed.total_questions, reward: completed.budget_reward }
-    : results
-    ? { score: results.score,   total: results.total,             reward: results.budget_reward }
+  // Score data for the done line.
+  // `reward` is only included when the user just submitted in this session
+  // (`results` is set). On subsequent views the +N tokens message is suppressed.
+  const doneScore = results
+    ? { score: results.score,             total: results.total,             reward: results.budget_reward }
+    : completed
+    ? { score: completed.score,           total: completed.total_questions, reward: null }
     : null;
 
   // ── Regenerate ─────────────────────────────────────────────────────────────
@@ -93,7 +95,8 @@ function QuizDisplay({ quiz, completed, sessionId, onNewQuiz }) {
         <span className="quiz-done-check">&#10003;</span>
         <span className="quiz-done-text">
           Quiz completed
-          {doneScore && ` — ${doneScore.score}/${doneScore.total} · +${doneScore.reward} tokens`}
+          {doneScore && ` — ${doneScore.score}/${doneScore.total}`}
+          {doneScore?.reward != null && ` · +${doneScore.reward} tokens`}
         </span>
         {onNewQuiz && (
           <button className="quiz-new-btn" onClick={onNewQuiz}>

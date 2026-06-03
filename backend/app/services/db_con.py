@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date as _date
+from datetime import date as _date, datetime as _datetime, timezone as _tz, timedelta as _td
 from typing import Optional
 
 import asyncpg  # type: ignore
@@ -176,6 +176,17 @@ CREATE TABLE IF NOT EXISTS schedule_entry (
     note            TEXT,
     created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
+
+-- Persistent per-user budget state that survives session deletion
+CREATE TABLE IF NOT EXISTS user_budget (
+    user_id       INT           PRIMARY KEY REFERENCES "user"(id_user) ON DELETE CASCADE,
+    visible_used  NUMERIC(12,4) NOT NULL DEFAULT 0,
+    shadow_used   NUMERIC(12,4) NOT NULL DEFAULT 0,
+    quiz_bonus    NUMERIC(12,4) NOT NULL DEFAULT 0,
+    depleted_at   TIMESTAMPTZ,
+    next_reset_at TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
 """
 
 # Runs the above DDL on startup to create tables
@@ -255,21 +266,47 @@ async def create_session(
 
     pool = await get_db_pool()
     async with pool.acquire() as conn:
+        # Restore persisted budget so usage/bonus survive session deletions
+        budget = await conn.fetchrow(
+            """
+            SELECT visible_used, shadow_used, quiz_bonus, depleted_at, next_reset_at
+            FROM   user_budget
+            WHERE  user_id = $1
+            """,
+            user_id,
+        )
+
+        if budget:
+            vis_used = budget["visible_used"]
+            shd_used = budget["shadow_used"]
+            quiz_bon = budget["quiz_bonus"]
+            dep_at   = budget["depleted_at"]
+            reset_at = budget["next_reset_at"]
+        else:
+            vis_used = shd_used = quiz_bon = 0
+            dep_at   = None
+            reset_at = None
+
+        # Compute default next_reset_at in Python to avoid SQL type-inference issues
+        # with a NULL $N parameter inside COALESCE
+        if reset_at is None:
+            today_utc = _datetime.now(_tz.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            reset_at = today_utc + _td(days=1)
+
         row = await conn.fetchrow(
             """
             INSERT INTO session (
                 user_id, daily_visible_limit, shadow_reserve,
                 visible_used, shadow_used, quiz_bonus,
-                next_reset_at
+                depleted_at, next_reset_at
             )
-            VALUES ($1, $2, $3, 0, 0, 0,
-                    DATE_TRUNC('day', NOW() AT TIME ZONE 'UTC')
-                    + INTERVAL '1 day')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
             """,
-            user_id,
-            daily_visible_limit,
-            shadow_reserve,
+            user_id, daily_visible_limit, shadow_reserve,
+            vis_used, shd_used, quiz_bon, dep_at, reset_at,
         )
     return dict(row)
 
@@ -295,10 +332,31 @@ async def get_user_sessions(user_id: int) -> list[dict]:
 async def delete_session(session_id: int) -> None:
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM session WHERE id_session = $1",
-            session_id,
-        )
+        async with conn.transaction():
+            # Persist the session's budget state so the next session inherits it
+            await conn.execute(
+                """
+                INSERT INTO user_budget
+                    (user_id, visible_used, shadow_used, quiz_bonus,
+                     depleted_at, next_reset_at)
+                SELECT s.user_id, s.visible_used, s.shadow_used, s.quiz_bonus,
+                       s.depleted_at, s.next_reset_at
+                FROM   session s
+                WHERE  s.id_session = $1
+                ON CONFLICT (user_id) DO UPDATE SET
+                    visible_used  = EXCLUDED.visible_used,
+                    shadow_used   = EXCLUDED.shadow_used,
+                    quiz_bonus    = EXCLUDED.quiz_bonus,
+                    depleted_at   = EXCLUDED.depleted_at,
+                    next_reset_at = EXCLUDED.next_reset_at,
+                    updated_at    = NOW()
+                """,
+                session_id,
+            )
+            await conn.execute(
+                "DELETE FROM session WHERE id_session = $1",
+                session_id,
+            )
 
 
 async def get_sessions_due_for_reset() -> list[int]:

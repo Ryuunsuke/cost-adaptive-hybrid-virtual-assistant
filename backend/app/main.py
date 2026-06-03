@@ -368,6 +368,25 @@ async def history_endpoint(session_id: int):
     return {"messages": messages}
 
 
+async def _run_chat(session_id: int, initial_state: dict, t0: float) -> dict:
+    """
+    Runs the agent graph, saves the assistant reply, and returns the response
+    payload.  Executed as an independent asyncio Task so it completes even when
+    the HTTP client disconnects mid-generation.
+    """
+    final_result = await assistant_graph.ainvoke(initial_state)
+    total_ms = round((time.perf_counter() - t0) * 1000)
+    reply = final_result["response"]
+    await create_message(session_id, "assistant", reply)
+    return {
+        "reply":            reply,
+        "routing_decision": final_result.get("routing_decision"),
+        "budget_pool_used": final_result.get("budget_pool_used"),
+        "total_ms":         total_ms,
+        "timings":          final_result.get("timings", {}),
+    }
+
+
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     print(f"[session={request.session_id}] user: {request.message}")
@@ -407,19 +426,16 @@ async def chat_endpoint(request: ChatRequest):
     }
 
     _t0 = time.perf_counter()
-    final_result = await assistant_graph.ainvoke(initial_state)
-    total_ms = round((time.perf_counter() - _t0) * 1000)
 
-    reply = final_result["response"]
-    await create_message(request.session_id, "assistant", reply)
+    # Run in an independent task so the LLM generation and DB save complete
+    # even if the HTTP client disconnects while switching sessions.
+    task = asyncio.create_task(_run_chat(request.session_id, initial_state, _t0))
 
-    return {
-        "reply":            reply,
-        "routing_decision": final_result.get("routing_decision"),
-        "budget_pool_used": final_result.get("budget_pool_used"),
-        "total_ms":         total_ms,
-        "timings":          final_result.get("timings", {}),
-    }
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Client disconnected — task continues in the background and saves to DB.
+        raise
 
 
 if __name__ == "__main__":
