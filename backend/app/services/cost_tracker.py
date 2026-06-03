@@ -124,16 +124,24 @@ async def check_pool_available(session_id: int) -> Pool:
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-                SELECT daily_visible_limit, visible_used, quiz_bonus, depleted_at
-                FROM   session
-                WHERE  id_session = $1
+                SELECT s.daily_visible_limit,
+                       s.quiz_bonus,
+                       s.depleted_at,
+                       COALESCE((
+                           SELECT SUM(s2.visible_used)
+                           FROM   session s2
+                           WHERE  s2.user_id = s.user_id
+                       ), 0) AS total_visible_used
+                FROM   session s
+                WHERE  s.id_session = $1
             """,
             session_id,
         )
         if row is None:
             raise ValueError(f"Session {session_id} not found")
 
-        visible_remaining = float(row["daily_visible_limit"]) - float(row["visible_used"])
+        # Compare total usage across ALL user sessions against the shared daily limit
+        visible_remaining = float(row["daily_visible_limit"]) - float(row["total_visible_used"])
 
         if visible_remaining > 0:
             return Pool.VISIBLE

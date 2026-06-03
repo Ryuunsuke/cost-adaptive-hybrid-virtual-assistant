@@ -266,10 +266,11 @@ async def create_session(
 
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        # Restore persisted budget so usage/bonus survive session deletions
+        # Restore only quiz_bonus and reset timing — each session always starts
+        # with visible_used = 0 and shadow_used = 0 (independent per-session tracking)
         budget = await conn.fetchrow(
             """
-            SELECT visible_used, shadow_used, quiz_bonus, depleted_at, next_reset_at
+            SELECT quiz_bonus, depleted_at, next_reset_at
             FROM   user_budget
             WHERE  user_id = $1
             """,
@@ -277,15 +278,17 @@ async def create_session(
         )
 
         if budget:
-            vis_used = budget["visible_used"]
-            shd_used = budget["shadow_used"]
             quiz_bon = budget["quiz_bonus"]
             dep_at   = budget["depleted_at"]
             reset_at = budget["next_reset_at"]
         else:
-            vis_used = shd_used = quiz_bon = 0
+            quiz_bon = 0
             dep_at   = None
             reset_at = None
+
+        # Usage always starts at 0 — each session has its own independent counter
+        vis_used = 0
+        shd_used = 0
 
         # Compute default next_reset_at in Python to avoid SQL type-inference issues
         # with a NULL $N parameter inside COALESCE
@@ -333,19 +336,16 @@ async def delete_session(session_id: int) -> None:
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Persist the session's budget state so the next session inherits it
+            # Persist only quiz_bonus and reset timing — visible/shadow usage is
+            # per-session and always starts fresh in the next session
             await conn.execute(
                 """
                 INSERT INTO user_budget
-                    (user_id, visible_used, shadow_used, quiz_bonus,
-                     depleted_at, next_reset_at)
-                SELECT s.user_id, s.visible_used, s.shadow_used, s.quiz_bonus,
-                       s.depleted_at, s.next_reset_at
+                    (user_id, quiz_bonus, depleted_at, next_reset_at)
+                SELECT s.user_id, s.quiz_bonus, s.depleted_at, s.next_reset_at
                 FROM   session s
                 WHERE  s.id_session = $1
                 ON CONFLICT (user_id) DO UPDATE SET
-                    visible_used  = EXCLUDED.visible_used,
-                    shadow_used   = EXCLUDED.shadow_used,
                     quiz_bonus    = EXCLUDED.quiz_bonus,
                     depleted_at   = EXCLUDED.depleted_at,
                     next_reset_at = EXCLUDED.next_reset_at,
@@ -921,3 +921,20 @@ async def get_user_schedule_entries(user_id: int) -> list[dict]:
             user_id,
         )
     return [_parse_schedule_row(r) for r in rows]
+
+
+async def get_user_visible_used(session_id: int) -> float:
+    """Total visible_used across ALL sessions belonging to the same user as session_id."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        result = await conn.fetchval(
+            """
+            SELECT COALESCE(SUM(s2.visible_used), 0)
+            FROM   session s2
+            WHERE  s2.user_id = (
+                SELECT user_id FROM session WHERE id_session = $1
+            )
+            """,
+            session_id,
+        )
+    return float(result or 0)

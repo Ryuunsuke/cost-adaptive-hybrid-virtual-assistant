@@ -28,6 +28,7 @@ from services.db_con import (
     get_user_schedule_entries,
     get_all_quiz_questions,
     get_files_by_ids,
+    get_user_visible_used,
 )
 
 
@@ -310,17 +311,19 @@ async def user_schedule_entries_endpoint(user_id: int):
 
 @app.get("/api/stats")
 async def stats_endpoint(session_id: int):
-    session, summary = await asyncio.gather(
+    session, summary, global_used = await asyncio.gather(
         get_session(session_id),
         get_session_cost_summary(session_id),
+        get_user_visible_used(session_id),
     )
     return {
         "budget": {
-            "visible_limit":  float(session["daily_visible_limit"]),
-            "visible_used":   float(session["visible_used"]),
-            "shadow_reserve": float(session["shadow_reserve"]),
-            "shadow_used":    float(session["shadow_used"]),
-            "quiz_bonus":     float(session["quiz_bonus"]),
+            "visible_limit":        float(session["daily_visible_limit"]),
+            "visible_used":         float(session["visible_used"]),   # this session only
+            "global_visible_used":  global_used,                      # all sessions combined
+            "shadow_reserve":       float(session["shadow_reserve"]),
+            "shadow_used":          float(session["shadow_used"]),
+            "quiz_bonus":           float(session["quiz_bonus"]),
         },
         "activity": {
             "local_requests": int(summary["local_requests"]),

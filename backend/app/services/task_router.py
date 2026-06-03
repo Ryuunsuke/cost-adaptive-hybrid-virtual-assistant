@@ -217,6 +217,11 @@ async def triage_node(state: AgentState) -> dict:
         category   = "administrative"
         confidence = max(confidence, 0.80)
 
+    # Keyword safety net: force requires_tool for free tools so the request
+    # always reaches tool_executor even when the local LLM misses it
+    if "flashcard" in msg_lower:
+        requires_tool = True
+
     print(
         f"[LANGGRAPH]: category={category}, confidence={confidence:.2f}, "
         f"requires_tool={requires_tool}"
@@ -574,18 +579,21 @@ async def tool_executor_node(state: AgentState) -> dict:
                 "timings":          _base_timings,
             }
 
-    if tool_calls == ["generate_flashcards"]:
-        fc_str = tool_results.get("generate_flashcards", "")
-        if fc_str:
-            return {
-                "tool_calls":       tool_calls,
-                "tool_results":     tool_results,
-                "response":         fc_str,
-                "routing_decision": "llama3.2:3b (tool path)",
-                "budget_pool_used": None,
-                "reasoning_steps":  reasoning_steps + ["flashcards_generated:direct_return"],
-                "timings":          _base_timings,
-            }
+    # Free-tool bypass: generate_flashcards runs entirely on the local model
+    # and never needs cloud synthesis.  Match on tool_results (tool ran) OR on
+    # forced_tool_name (tool was intended even if selection failed).
+    _fc_result = tool_results.get("generate_flashcards")
+    _fc_forced = state.get("forced_tool_name") == "generate_flashcards"
+    if _fc_result or _fc_forced:
+        return {
+            "tool_calls":       tool_calls,
+            "tool_results":     tool_results,
+            "response":         _fc_result or "Flashcard generation failed. Please try again.",
+            "routing_decision": "llama3.2:3b (tool path)",
+            "budget_pool_used": None,
+            "reasoning_steps":  reasoning_steps + ["flashcards_generated:direct_return"],
+            "timings":          _base_timings,
+        }
 
     # ── Synthesis – GPT-4o mini with tool results as grounded context ─────
     tool_context = ""

@@ -63,7 +63,7 @@ function Stats({ sessionId, username }) {
           <div className="stat-label">
             <span>Available Tokens</span>
             <span className="stat-value">
-              {Math.max(0, budget.visible_limit - budget.visible_used).toFixed(0)}
+              {Math.max(0, budget.visible_limit - (budget.global_visible_used ?? budget.visible_used)).toFixed(0)}
               {' / '}
               {budget.visible_limit.toFixed(0)}
               {showBonus && budget.quiz_bonus > 0 && (
@@ -72,7 +72,7 @@ function Stats({ sessionId, username }) {
             </span>
           </div>
           <ProgressBar
-            remaining={Math.max(0, budget.visible_limit - budget.visible_used)}
+            remaining={Math.max(0, budget.visible_limit - (budget.global_visible_used ?? budget.visible_used))}
             total={budget.visible_limit}
           />
         </div>
