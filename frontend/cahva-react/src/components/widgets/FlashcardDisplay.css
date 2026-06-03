@@ -13,13 +13,14 @@
   letter-spacing: 0.04em;
 }
 
-/* 3-D scene container */
+/* 3-D scene container — height set via JS to match tallest face */
 .fc-scene {
   width: 100%;
-  max-width: 420px;
-  height: 200px;
+  max-width: 100%;
+  min-height: 140px;
   perspective: 900px;
   cursor: pointer;
+  position: relative;
 }
 
 /* Card — holds both faces */
@@ -36,10 +37,13 @@
   transform: rotateY(180deg);
 }
 
-/* Shared face styles */
+/* Shared face styles — top/left/right anchor but NO bottom, so content
+   determines height rather than the container clamping it */
 .fc-face {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  right: 0;
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
   border-radius: 12px;
